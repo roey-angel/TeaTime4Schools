@@ -1,0 +1,875 @@
+---
+title: "TeaTime4schools: Joint analysis - bacteria"
+subtitle: "06 Alpha diversity analysis"
+author: "Roey Angel"
+email: "roey.angel@bc.cas.cz"
+date: "`r Sys.Date()`"
+bibliography: references.bib
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+always_allow_html: true
+output:
+  rmarkdown::github_document:
+    toc: true
+    toc_depth: 5
+    number_sections: false
+    dev: "png"
+    df_print: "kable"
+    keep_html: true
+---
+
+```{r libraries, include=F}
+# Load libraries
+#.libPaths(c('~/R/library', .libPaths())) # Uncomment if you have no write access to R path
+library(ragg) # Graphic Devices Based on AGG, CRAN v1.1.2 
+library(knitr) # A General-Purpose Package for Dynamic Report Generation in R
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax
+library(rmarkdown) # Dynamic Documents for R
+library(extrafont) # for extra figure fonts
+library(tidyverse) # for dplyr forcats ggplot2 readr tibble
+library(broom) # Convert Statistical Analysis Objects into Tidy Data Frames (should be part of tidyverse)
+library(gridExtra) # Miscellaneous Functions for "Grid" Graphics
+library(cowplot) # wrappers for ggplot
+library(ggsci) # Scientific Journal and Sci-Fi Themed Color Palettes for 'ggplot2' 
+library(magrittr) # pipes
+library(scales) # Generic plot scaling methods
+library(svglite) # for svg files
+library(vegan) # community ecology methods
+library(car) # Companion to Applied Regression
+library(grid) # The Grid Graphics Package
+library(doParallel) # parallel backend for the foreach/%dopar% function
+library(BiodiversityR) # Package for Community Ecology and Suitability Analysis 
+library(rcompanion) #Functions to Support Extension Education Program Evaluation
+library(emmeans) # Estimated Marginal Means, aka Least-Squares Means, CRAN v1.5.1
+library(multcomp) # Simultaneous Inference in General Parametric Models, CRAN v1.4-14
+library(MASS) # Support Functions and Datasets for Venables and Ripley's MASS
+library(phyloseq) # Handling and analysis of high-throughput phylogenetic sequence data
+```
+
+```{r style settings, include=F}
+options(width = 90, knitr.table.format = "html") 
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "ragg_png",
+  fig.ext = "png",
+  dpi = 300,
+#  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "06_Alpha_cache/",
+  fig.path = "06_Alpha_figures/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 14
+font_import(pattern = "DejaVuSans\\.", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+```{r functions, include=F}
+PlotLmResid <- function(lm.df, which = c(1:6), mfrow = c(3, 2)){
+
+  if (length(levels(as.factor(lm.df$.fitted))) < 10) {# if number of unique x values is <10 just draw a line through the means
+    smoother <- stat_summary(fun.y = mean, colour = "red", geom = "line")
+  } else smoother <- stat_smooth(method = "loess", geom = "smooth", se = FALSE, colour = "firebrick", size = 1)
+  
+  # residuals vs fitted
+  g1 <- ggplot(lm.df, aes(.fitted, .resid)) +
+    geom_point()  +
+    smoother + 
+    geom_hline(yintercept = 0, linetype = 2, size = .2) +
+    scale_x_continuous("Fitted Values") +
+    scale_y_continuous("Residual") +
+    labs(title = "Residuals vs Fitted")
+  
+  # normal qq
+  a <- quantile(lm.df$.stdresid, c(0.25, 0.75), na.rm = TRUE)
+  b <- qnorm(c(0.25, 0.75))
+  slope <- diff(a)/diff(b)
+  int <- a[1] - slope * b[1]
+  g2 <- ggplot(lm.df, aes(sample = .stdresid)) +
+    stat_qq() +
+    geom_abline(slope = slope, intercept = int, colour = "firebrick", size = 1) +
+      scale_x_continuous("Theoretical Quantiles") +
+      scale_y_continuous("Standardized Quantiles") +
+      labs(title = "Normal Q-Q")
+ 
+  # scale-location
+  g3 <- ggplot(lm.df, aes(.fitted, sqrt(abs(.stdresid)))) +
+    geom_point() +
+    smoother +
+    scale_x_continuous("Fitted Values") +
+    scale_y_continuous("Root of Standardized Residuals") +
+    labs(title = "Scale-Location")
+ 
+  # residuals vs leverage
+  g4 <- ggplot(lm.df, aes(factors, .stdresid)) +
+    geom_point() +
+    smoother +
+    geom_hline(yintercept = 0, linetype = 2, size = .2) +
+    scale_x_continuous("Factor Level Combinations") +
+    scale_y_continuous("Standardized Residuals") +
+    labs(title = "Residuals vs Factor Levels")
+ 
+#   # cook's distance
+#   g5 <-  ggplot(lm.df, aes(rows, .cooksd, ymin=0, ymax=.cooksd)) +
+#     geom_point() + geom_linerange() +
+#     scale_x_continuous("Observation Number") +
+#     scale_y_continuous("Cook's distance") +
+#     labs(title="Cook's Distance")  
+  
+  # cooksd vs leverage
+  g5 <- ggplot(lm.df, aes(factors, .cooksd)) +
+    geom_point() +
+    smoother +
+    scale_x_continuous("Factor Level Combinations") +
+    scale_y_continuous("Cook's distance") +
+    labs(title = "Cook's dist vs Leverage")
+  
+  # g6 <- PlotACF(lm.df)
+  bw <- diff(range(lm.df$.resid)) / (2 * IQR(lm.df$.resid) / length(lm.df$.resid) ^ (1/3))
+  sshist <- function(x){ # optimise bins
+  # 2006 Author Hideaki Shimazaki
+  # Department of Physics, Kyoto University
+  # shimazaki at ton.scphys.kyoto-u.ac.jp
+	N <- 2 : 100
+	C <- numeric(length(N))
+	D <- C
+
+	for (i in 1:length(N)) {
+		D[i] <- diff(range(x)) / N[i]
+
+		edges = seq(min(x), max(x), length=N[i])
+		hp <- hist(x, breaks = edges, plot=FALSE)
+		ki <- hp$counts
+
+		k <- mean(ki)
+		v <- sum((ki-k) ^ 2) / N[i]
+
+		C[i] <- (2 * k-v) / D[i] ^ 2	#Cost Function
+	}
+
+	idx <- which.min(C)
+	optD <- D[idx]
+
+	bins <- seq(min(x), max(x), length=N[idx])
+	# h = hist(x, breaks = bins)
+	# rug(x)
+
+	return(bins)
+  }
+  
+  bins <- sshist(lm.df$.resid)
+  g6 <- ggplot(lm.df, aes(.resid)) + 
+    geom_histogram(breaks = bins)
+ 
+  plots <- list(g1, g2, g3, g4, g5, g6)
+ 
+  # making the plots
+  grid.newpage()
+ 
+  if (prod(mfrow) > 1) {
+    mypos <- expand.grid(1:mfrow[1], 1:mfrow[2])
+    mypos <- mypos[with(mypos, order(Var1)), ]
+    pushViewport(viewport(layout = grid.layout(mfrow[1], mfrow[2])))
+    formatter <- function(.){}
+  } else {
+    mypos <- data.frame(matrix(1, length(which), 2))
+    pushViewport(viewport(layout = grid.layout(1, 1)))
+    formatter <- function(.) {
+      .dontcare <- readline("Hit <Return> to see next plot: ")
+      grid.newpage()
+    }
+  }
+ 
+  j <- 1
+  for (i in which) {
+    formatter()
+    print(plots[[i]], vp = viewport(layout.pos.row = mypos[j, ][1], layout.pos.col = mypos[j, ][2]))
+    j <- j + 1
+  }
+}
+
+PlotACF <- function(lm.df){
+  ## generate ACF plot for lm and lme
+  # compute acf without plotting
+  acz <- acf(lm.df$.resid, plot = F)
+  # convert to data frame
+  acd <- data.frame(lag = acz$lag, acf = acz$acf)
+  # use data frame for ggplot
+  ggplot(acd, aes(lag, acf)) + 
+    geom_bar(colour = "black", fill = "black", stat = "identity", position = "dodge", width = 0.01) +
+    geom_point(colour = "black") +
+    geom_hline(yintercept = c(0.05, -0.05), linetype = "dashed") +
+    geom_hline(yintercept = 0)
+}
+
+PlotSummarySingle_overlay <-
+  function(data2plot,
+           x = "Sample",
+           y = "Estimate",
+           ymin = "lerr",
+           ymax = "herr",
+           colour = "Metric",
+           ...) {
+    ## plot richness estimates with error bars, overlay several metrics over observed S
+    # parameters: data2plot long format with "Sample", "Metric", "Estimate", "lerr", "herr" as columns.
+    ggplot(data2plot) +
+      geom_point(
+        data = data2plot[data2plot$Metric != "Observed S", ],
+        aes_string(x = x, y = y, colour = colour),
+        position = position_dodge(0.4),
+        size = 4
+      ) +
+      geom_errorbar(
+        data = data2plot[data2plot$Metric != "Observed S", ],
+        aes_string(
+          x = x,
+          ymin = ymin,
+          ymax = ymax,
+          colour = colour
+        ),
+        alpha = 1 / 2,
+        position = position_dodge(0.4),
+        width = 0.3
+      ) +
+      geom_bar(data = data2plot[data2plot$Metric == "Observed S", ],
+               aes_q(
+                 x = as.name(x),
+                 y = as.name(y),
+                 fill = "S Obs."
+               ),
+               stat = "summary", 
+               fun.y = "mean")  +
+      geom_errorbar(
+        data = data2plot[data2plot$Metric == "Observed S", ],
+        aes_string(x = x, ymin = ymin, ymax = ymax),
+        colour = "black",
+        alpha = 1 / 2,
+        width = 0.3
+      ) +
+      scale_fill_manual(
+        name = "",
+        labels = c("S obs."),
+        values = "green4"
+      ) +
+      # scale_colour_manual(name = "Metric",
+      #                     labels = c("Observed S", "Ace", "Parametric"),
+      #                     values = c("#E41A1C", "#4DAF4A", "#377EB8")) +
+      xlab("") +
+      scale_y_continuous("OTUs", limits = c(0, max(data2plot$herr * 1.1))) +
+      theme(axis.text.x = element_text(
+        angle = 45.0,
+        vjust = 1,
+        hjust = 1
+      )) +
+      guides(color = guide_legend(order = 1),
+             fill = guide_legend(order = 2))
+  }
+
+PlotSummarySingle <- function(data, x = "Sample", y = "Estimate", ymin = "lerr", ymax = "herr", colour = "Metric", ...){
+  ## plot output from catchall or summary single with error bars
+  # parameters: data.frame;
+  ggplot(data, aes_string(x = x, y = y, ymin = ymin, ymax = ymax)) +
+    geom_point(aes_string(colour = colour), size = 3) +
+    geom_errorbar(alpha = 1/2, width = 0.3) +
+    xlab("") +
+    ylab("") +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.9, hjust = 1)) +
+    facet_grid(reformulate(".", colour), scale = "free")
+    # facet_grid(Metric ~ ., scale = "free")
+}
+
+ggplotRegression <- function(fit, colour = "black") {
+  # plot regression line with coefficients
+    #usage ggplotRegression(lm(real~measured, data=std))
+    ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+        geom_point(aes_string(colour = colour)) +
+        stat_smooth(method = "lm", col = "red") +
+        labs(title = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                           "; Intercept =",signif(fit$coef[[1]], 5),
+                           "; Slope =",signif(fit$coef[[2]], 5),
+                           "; P =",signif(summary(fit)$coef[2,4], 5))) +
+        theme(plot.title = element_text(size = 8))
+}
+
+PlotSummaryViolin <- function(Richness_Diversity.long, x = "Treatment", y = "Estimate", colour = "Metric", fill = "Metric") {
+  ggplot(Richness_Diversity.long,
+         aes_string(
+           x = x,
+           y = y,
+           ymin = "lerr",
+           ymax = "herr"
+         )) +
+    geom_violin(aes_string(colour = colour, fill = fill), alpha = 1 / 3) +
+    geom_jitter(aes_string(colour = colour), size = 2, width = 0.2) +
+    scale_colour_locuszoom(name = "") +
+    scale_fill_locuszoom(name = "") +
+    theme_cowplot(font_size = 16) +
+    # geom_errorbar(alpha = 1 / 2, width = 0.3) +
+    xlab("") +
+    ylab("") +
+    theme(axis.text.x = element_text(
+      angle = 45,
+      vjust = 0.9,
+      hjust = 1
+    )) +
+    facet_grid(Metric ~ Year, scale = "free") +
+    background_grid(major = "y",
+                    minor = "none",
+                    size.major = 0.8)
+}
+
+TestAlphaV3 <- function(data2test = Richness_Diversity_long_sub,
+                        response_name = "Estimate",
+                        factor_names = c("Sample.type", "Season", "Field"),
+                        boxcox.trans = FALSE) {
+  
+    require(dplyr)
+      mod_lm <-
+        aov(as.formula(paste(
+          response_name,
+          paste(factor_names[1], factor_names[2], sep = " * "),
+          sep = " ~ "
+        )), data2test)
+    # }
+    
+    if (boxcox.trans) {
+      # employ boxcox transformation then recalculate model
+      print("Performing Box-Cox transformation of the data")
+      lambdas <- boxcox(as.formula(paste(
+        response_name,
+        paste(factor_names[1], factor_names[2], sep = " * "),
+        sep = " ~ "
+      )),
+      data = data2test,
+      lambda = seq(0, 1.0, 0.01))
+      print(range(lambdas$x[lambdas$y > max(lambdas$y) - qchisq(0.95, 1) /
+                              2]))
+      print(l.max <- lambdas$x[which.max(lambdas$y)])
+      if (l.max == 0)
+        l.max <- 1
+      data2test$Estimate.box <-
+        (data2test$Estimate ^ l.max - 1) / l.max
+      mod_lm <-
+        aov(as.formula(paste(
+          "Estimate.box",
+          paste(factor_names[1], factor_names[2], sep = " * "),
+          sep = " ~ "
+        )), data2test)
+    }
+    
+    if (exists("mod_lm")) {
+      print(mod_lm)
+      mod_df <- fortify(mod_lm)
+      factor.combinations <-
+        as.numeric(factor(paste(mod_df[, factor_names[1]], mod_df[, factor_names[2]]),
+                          levels = unique(as.character(
+                            paste(mod_df[, factor_names[1]], mod_df[, factor_names[2]])
+                          )))) # needed for "residuals vs leverage
+      mod_df <-
+        cbind(mod_df,
+              rows = 1:nrow(mod_df),
+              factors = factor.combinations)
+      PlotLmResid(mod_df)
+      if ((data2test %>% group_by(!!sym(factor_names[1]),!! sym(factor_names[2])) %>% dplyr::count() %>% pull(n) %>% n_distinct() == 1)) {
+        print("Equal group sizes - showing SS type I")
+        print(summary(mod_lm)) # display Type I ANOVA table
+        } else {
+          print("Unequal group sizes - showing SS type III")
+          options(contrasts = c("contr.sum", "contr.poly"))
+          print(Anova(mod_lm, type = "III")) # type III SS
+          }
+      print(model.tables(mod_lm, "means"), digits = 3) # Show the means
+      return(mod_lm)
+    }
+}
+```
+[roey.angel@bc.cas.cz](mailto: roey.angel@bc.cas.cz)  
+
+## Alpha diversity analysis
+This analysis explores the alpha-diversity distribution patters in the different samples, based on the DADA2-produced sequences. 
+
+### Setting general parameters:
+```{r general parameters}
+set.seed(1000)
+subsamples <- 1000
+min_lib_size <- 5000
+metadata_path <- "./"
+data_path <- "./DADA2_pseudo/"
+Ps_file <- "TeaTime4Schools_16S_filt.RDS"
+Proj_name <- "TeaTime4Schools"
+```
+
+### Load phyloseq object
+This phyloseq object was created in [05_Phylogentic_ _analysis.html](05_Phylogentic_ _analysis.html). 
+The Ps_obj_filt object excludes contaminants and all sequences classified as eukaryota, chloroplast, mitochondria or unknown but still includes taxa with low prevalence 
+```{r load phyloseq, cache=T}
+Ps_obj_filt <- readRDS(file = paste0(data_path, Ps_file))
+Ps_obj_filt %>%
+  subset_samples(., sample_sums(Ps_obj_filt) > min_lib_size) %>% # drop samples below min_lib_size
+  subset_samples(., Field != "Unburied") %>% # drop unburied samples
+  filter_taxa(., function(x)
+    sum(x) > 0, TRUE) -> # remove taxa with 0 abundance
+  Ps_obj_filt_subset
+
+Ps_obj_filt_subset %>% 
+  get_variable() %>% 
+  mutate(across("Sample.type", 
+            ~fct_relevel(., levels = c("Soil", "Green tea", "Rooibos")))) %>% 
+  mutate(across("Season", 
+            ~fct_relevel(., levels = c("Winter", "Spring", "Summer", "Autumn")))) %>% 
+  arrange(Field, Sample.type, Season, Replicate) %>% 
+  pull(Description) %>% 
+  as.character() ->
+  Sample.order
+```
+
+### Richness
+```{r calculate richness, cache=TRUE}
+# tic()
+abundance_mat <- as(otu_table(Ps_obj_filt_subset), "matrix") # use Ps_obj_filt_subset - no contaminants, no euk, chloro, mito, unknowns
+## Original data
+Original <-
+  data.frame(Reads = rowSums(abundance_mat),
+             S = apply(abundance_mat, 1, function(x)
+               sum(x > 0)))
+
+# Assign rarefaction mat  
+rarefaction_mat <- 
+  matrix(0, nrow = nrow(abundance_mat), ncol = subsamples)
+rownames(rarefaction_mat) <- rownames(abundance_mat)
+
+# Declare richness est table
+rich.ests <-
+  list(
+  S.obs = rarefaction_mat,
+  S.chao1 = rarefaction_mat,
+  se.chao1 = rarefaction_mat,
+  S.ACE = rarefaction_mat,
+  se.ACE = rarefaction_mat
+  )
+
+# Rarefy abundance_mat and calc estimates
+for (i in seq(subsamples)) {
+  sub.OTUmat <-
+    rrarefy(abundance_mat, min(rowSums(abundance_mat)))
+    # rrarefy(abundance_mat, quantile(rowSums(abundance_mat), probs = seq(0, 1, rare2quant))[2])
+  for (j in seq(length(rich.ests))) {
+    rich.ests[[j]][, i] <- t(estimateR(sub.OTUmat))[, j]
+  }
+}
+
+# Calculate means and SEM of subsamples
+Richness <- data.frame(row.names = row.names(rich.ests[[1]]))
+for (i in c(1, seq(2, length(rich.ests), 2))) {
+  S <- apply(rich.ests[[i]], 1, mean)
+  if (i == 1) {
+    se <-
+      apply(rich.ests[[i]], 1, function(x)
+        (mean(x) / sqrt(length(x))))
+  } else
+    se <- apply(rich.ests[[i + 1]], 1, mean)
+  Richness <- cbind(Richness, S, se)
+}
+colnames(Richness) <-
+  c("S.obs.Estimate",
+    "S.obs.SE",
+    "S.chao1.Estimate",
+    "S.chao1.SE",
+    "S.ACE.Estimate",
+    "S.ACE.SE")
+
+## Parametric richness estimates
+## DOESN'T WORK WITH DADA2 SINCE SINGLETONS ARE REMOVED
+# # convert to list
+# abundance_mat_freqs <- apply(abundance_mat, 1, table)
+# # declare results table
+# parametric <-
+#   data.frame(matrix(0, nrow = nrow(abundance_mat), ncol = 4),
+#              row.names = rownames(abundance_mat))
+# colnames(parametric) <-
+#   c("bway.est", "bway.se", "bway_nof1.est", "bway_nof1.se")
+# # calc parametric estimates
+# for (i in seq(length(abundance_mat_freqs))) {
+#   possibleError <-
+#     tryCatch(
+#       breakaway.mod <-
+#         breakaway(
+#           data.frame(abundance_mat_freqs[[i]])[-1, ],
+#           print = FALSE,
+#           plot = FALSE,
+#           answers = TRUE
+#         ),
+#       error = function(e)
+#         e
+#     )
+#   if (is.null(breakaway.mod)) {
+#     parametric[i, 1] <- 0
+#     parametric[i, 2] <- 0
+#   } else {
+#     parametric[i, 1] <- breakaway.mod$est
+#     parametric[i, 2] <- breakaway.mod$seest
+#   }
+#   
+#   possibleError <-
+#     tryCatch(
+#       breakaway_nof1.mod <-
+#         breakaway_nof1(
+#           data.frame(abundance_mat_freqs[[i]])[-c(1, 2), ],
+#           print = FALSE,
+#           plot = FALSE,
+#           answers = TRUE
+#         ),
+#       error = function(e)
+#         e
+#     )
+#   if (is.null(breakaway_nof1.mod)) {
+#     parametric[i, 3] <- 0
+#     parametric[i, 4] <- 0
+#   } else {
+#     parametric[i, 3] <- breakaway_nof1.mod$est
+#     parametric[i, 4] <- breakaway_nof1.mod$seest
+#   }
+# }
+```
+
+Merge tables and save
+```{r save richness, cache=TRUE}
+# Richness.Table <- cbind(Richness, parametric)
+# Richness.Table <- Richness # only
+saveRDS(cbind(Original, Richness),
+        file = paste0(Proj_name, "_Richness.RDS"))
+write.csv(cbind(Original, Richness),
+        file = paste0(Proj_name, "_Richness.csv"))
+```
+
+#### Plot richness estimates
+```{r plot richness, cache=TRUE}
+Richness %>% 
+  rownames_to_column(var = "Sample") %>% # get sample names
+  mutate_at(., "Sample", ~str_replace_all(., "Green_tea", "Green tea")) %>% #
+  mutate_at(., "Sample", ~fct_relevel(., levels = Sample.order)) %>% 
+  bind_cols(., get_variable(Ps_obj_filt_subset, 
+                            c("Lib.size", "Field", "Sample.type", "Season", "Replicate"))) %>% # add metadata
+  pivot_longer(cols = c(-"Sample", -"Lib.size", -"Field", -"Sample.type", -"Season", -"Replicate"), 
+               names_to = c("Metric", ".value"), 
+               values_to = c("Estimate", "SE"), 
+               names_pattern = "(.*\\..*)\\.(.*)") %>% # gather all metrices to one column
+  mutate_at(., "Season", 
+            ~fct_relevel(., levels = c("Winter", "Spring", "Summer", "Autumn"))) %>% 
+  mutate_at(., "Metric", ~fct_recode(., `Observed S` = "S.obs", Chao1 = "S.chao1", ACE = "S.ACE")) %>% 
+  mutate(Estimate, herr = Estimate + SE, lerr = Estimate - SE) ->
+  Richness_long
+
+PlotSummarySingle_overlay(Richness_long)
+
+fit <- lm(Estimate ~ Lib.size, 
+                        data = Richness_long[Richness_long$Metric == "Observed S", ])
+fit$model$Sample <- str_replace(Richness_long[Richness_long$Metric == "Observed S", ]$Sample, "(.*)_[0-9]$", "\\1")
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  geom_point(aes(colour = fit$model$Sample)) +
+  stat_smooth(method = "lm", col = "red") +
+  labs(title = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                     "; Intercept =",signif(fit$coef[[1]], 5),
+                     "; Slope =",signif(fit$coef[[2]], 5),
+                     "; P =",signif(summary(fit)$coef[2,4], 5))) +
+  theme(plot.title = element_text(size = 8)) + 
+  theme(legend.position = "none")
+
+PlotSummarySingle_overlay(x = "Season", Richness_long) + 
+  facet_grid(Field ~ Sample.type) 
+```
+
+Combine replicates
+```{r combined richness, cache=TRUE}
+Richness_long %>%
+  group_by(Field, Season, Sample.type, Metric) %>%
+  summarise(
+    Mean = mean(Estimate),
+    lerr = Mean - (sd(Estimate)) / sqrt(length(Estimate)),
+    herr = Mean + (sd(Estimate)) / sqrt(length(Estimate))
+  ) ->
+  Combined_Richness_long
+
+# plot
+PlotSummarySingle_overlay(x = "Season", y = "Mean", Combined_Richness_long) + 
+  facet_grid(Field ~ Sample.type) 
+```
+
+### Diversity
+```{r calculate diversity, cache=TRUE}
+# calculate diversity indices
+# declare diversity indices table
+diversity.inds <-
+  list(Shannon = rarefaction_mat,
+       inv.simpson = rarefaction_mat,
+       BP = rarefaction_mat)
+# rarefy abundance_mat and calc estimates
+for (i in seq(subsamples)) {
+  sub.OTUmat <-
+    rrarefy(abundance_mat, min(rowSums(abundance_mat)))
+    # rrarefy(abundance_mat, quantile(rowSums(abundance_mat), probs = seq(0, 1, rare2quant))[2])
+  diversity.inds$Shannon[, i] <-
+    diversityresult(sub.OTUmat,
+                    index = 'Shannon' ,
+                    method = 'each site',
+                    digits = 3)[, 1]
+  diversity.inds$inv.simpson[, i] <-
+    diversityresult(sub.OTUmat,
+                    index = 'inverseSimpson' ,
+                    method = 'each site',
+                    digits = 3)[, 1]
+  diversity.inds$BP[, i] <-
+    diversityresult(sub.OTUmat,
+                    index = 'Berger' ,
+                    method = 'each site',
+                    digits = 3)[, 1]
+}
+# calculate means and SEM of subsamples
+Diversity <-
+  data.frame(row.names = row.names(diversity.inds[[1]]))
+for (i in seq(length(diversity.inds))) {
+  S <- apply(diversity.inds[[i]], 1, mean)
+  se <-
+    apply(diversity.inds[[i]], 1, function(x)
+      (mean(x) / sqrt(length(x))))
+  Diversity <- cbind(Diversity, S, se)
+}
+colnames(Diversity) <-
+  c("Shannon.Estimate",
+    "Shannon.SE",
+    "InvSimpson.Estimate",
+    "InvSimpson.SE",
+    "BP.Estimate",
+    "BP.SE")
+```
+
+Merge tables and save
+```{r save diversity, cache=TRUE}
+saveRDS(Diversity, file = "Ps_obj_Diversity.Rds")
+write.csv(Diversity, file = "Ps_obj_Diversity.csv")
+```
+
+Plot diversity indices
+```{r plot diversity, cache=TRUE}
+Diversity %>% 
+  rownames_to_column(var = "Sample") %>% # get sample names
+  mutate_at(., "Sample", ~str_replace_all(., "Green_tea", "Green tea")) %>% #
+  mutate_at(., "Sample", as.factor)  %>% 
+  mutate_at(., "Sample", ~fct_relevel(., levels = Sample.order)) %>% 
+  bind_cols(., get_variable(Ps_obj_filt_subset, 
+                            c("Lib.size", "Field", "Sample.type", "Season", "Replicate"))) %>% # add metadata
+  pivot_longer(cols = c(-"Sample", -"Lib.size", -"Field", -"Sample.type", -"Season", -"Replicate"), 
+               names_to = c("Metric", ".value"), 
+               values_to = c("Estimate", "SE"), 
+               names_pattern = "(.*)\\.(.*)") %>% # gather all metrices to one column
+  mutate_at(., "Season", 
+            ~fct_relevel(., levels = c("Winter", "Spring", "Summer", "Autumn"))) %>% 
+  mutate_at(., "Metric", ~fct_recode(., "Inv. Simpson" = "InvSimpson", "Berger Parker" = "BP")) %>% 
+  mutate(Estimate, herr = Estimate + SE, lerr = Estimate - SE) ->
+  Diversity_long
+
+PlotSummarySingle(Diversity_long, y = "Estimate", colour = "Metric") + 
+  background_grid(major = "y", minor = "none", size.major = 0.8) 
+
+PlotSummarySingle(Diversity_long, x = "Season", y = "Estimate", colour = "Metric") + 
+  facet_grid(Metric ~ Sample.type, scale = "free") + 
+  background_grid(major = "y", minor = "none", size.major = 0.8)
+```
+
+Combine replicates
+```{r combined diversity, cache=TRUE}
+Diversity_long %>%
+  group_by(Field, Season, Sample.type, Metric) %>%
+  summarise(
+    Mean = mean(Estimate),
+    lerr = Mean - (sd(Estimate)) / sqrt(length(Estimate)),
+    herr = Mean + (sd(Estimate)) / sqrt(length(Estimate))
+  ) ->
+  Combined_Diversity_long
+
+# plot
+p <- PlotSummarySingle(Combined_Diversity_long, x = "Sample.type", y = "Mean", colour = "Metric") 
+p$layers[[1]] <- NULL
+p +
+  geom_point(aes_string(colour = "Metric", shape = "Season"), size = 3) +
+  facet_grid(Metric ~ Field, scales = "free") + 
+  background_grid(major = "y", minor = "none", size.major = 0.8) 
+```
+
+```{r make richness diversity table, cache=T, include=F}
+Richness_Diversity <- cbind(SObs.Estimate = Richness$S.obs.Estimate, SObs.SE = Richness$S.obs.SE, Diversity)
+
+Richness_Diversity %>% 
+  rownames_to_column(var = "Sample") %>% # get sample names
+  mutate_at(., "Sample", ~str_replace_all(., "Green_tea", "Green tea")) %>% #
+  mutate_at(., "Sample", as.factor)  %>% 
+  mutate_at(., "Sample", ~fct_relevel(., levels = Sample.order)) %>% 
+  bind_cols(., get_variable(Ps_obj_filt_subset, 
+                            c("Lib.size", "Field", "Sample.type", "Season", "Replicate"))) %>% # add metadata
+  pivot_longer(cols = c(-"Sample", -"Lib.size", -"Field", -"Sample.type", -"Season", -"Replicate"), 
+               names_to = c("Metric", ".value"), 
+               values_to = c("Estimate", "SE"), 
+               names_pattern = "(.*)\\.(.*)") %>% # gather all metrices to one column
+  mutate_at(., "Metric", ~fct_recode(., "Observed S" = "SObs", "Inv. Simpson" = "InvSimpson", "Berger Parker" = "BP")) %>% 
+  mutate_at(., "Metric", ~fct_relevel(., "Observed S", "Inv. Simpson", "Shannon", "Berger Parker")) %>% 
+  mutate(Estimate, herr = Estimate + SE, lerr = Estimate - SE) ->
+  Richness_Diversity_long
+```
+
+```{r test alpha, cache=T, include=T}
+(mod_obsS <- TestAlphaV3(filter(Richness_Diversity_long, Metric == "Observed S")))
+# Post-hoc test
+marginal <- emmeans(mod_obsS,
+                   ~ Sample.type : Season)
+summary(marginal)
+contrast(marginal, 
+         method = "pairwise", 
+         adjust = "tukey")
+(obsS_pairwise <- cld(marginal,
+                      alpha = 0.05,
+                      Letters = letters,
+                      adjust = "tukey")) # works with lm but not with two-factor ART
+(mod_obsS %>% 
+  anova() %>% 
+  mutate(`Part Eta Sq`=`Sum Sq`/sum(`Sum Sq`) ) ->
+  mod_obsS_ANOVA)
+# pwpp(marginal) # Pairwise P-value plot. Fails for unbalanced design
+emmip(mod_obsS, Sample.type ~ Season)
+# summary(as.glht(pairs(marginal))) # fails because of unbalanced design
+
+(mod_S <- TestAlphaV3(filter(Richness_Diversity_long, Metric == "Shannon")))
+# Post-hoc test
+marginal <- emmeans(mod_S,
+                   ~ Sample.type : Season)
+summary(marginal)
+contrast(marginal, 
+         method = "pairwise", 
+         adjust = "tukey")
+(Shannon_pairwise <- cld(marginal,
+                      alpha = 0.05,
+                      Letters = letters,
+                      adjust = "tukey")) # works with lm but not with two-factor ART
+(mod_S %>% 
+  anova() %>% 
+  mutate(`Part Eta Sq`=`Sum Sq`/sum(`Sum Sq`) ) ->
+  mod_S_ANOVA)
+# pwpp(marginal) # Pairwise P-value plot. Fails for unbalanced design
+emmip(mod_S, Sample.type ~ Season)
+# summary(as.glht(pairs(marginal))) # fails because of unbalanced design
+
+(mod_IS <- TestAlphaV3(filter(Richness_Diversity_long, Metric == "Inv. Simpson")))
+# Post-hoc test
+marginal <- emmeans(mod_IS,
+                   ~ Sample.type : Season)
+summary(marginal)
+contrast(marginal, 
+         method = "pairwise", 
+         adjust = "tukey")
+(InvSim_pairwise <- cld(marginal,
+                      alpha = 0.05,
+                      Letters = letters,
+                      adjust = "tukey")) # works with lm but not with two-factor ART
+(mod_IS %>% 
+  anova() %>% 
+  mutate(`Part Eta Sq`=`Sum Sq`/sum(`Sum Sq`) ) ->
+  mod_IS_ANOVA)
+# pwpp(marginal) # Pairwise P-value plot. Fails for unbalanced design
+emmip(mod_IS, Sample.type ~ Season)
+# summary(as.glht(pairs(marginal))) # fails because of unbalanced design
+
+(mod_BP <- TestAlphaV3(filter(Richness_Diversity_long, Metric == "Berger Parker")))
+# Post-hoc test
+marginal <- emmeans(mod_BP,
+                   ~ Sample.type : Season)
+summary(marginal)
+contrast(marginal, 
+         method = "pairwise", 
+         adjust = "tukey")
+(BP_pairwise <- cld(marginal,
+                      alpha = 0.05,
+                      Letters = letters,
+                      adjust = "tukey")) # works with lm but not with two-factor ART
+(mod_BP %>% 
+  anova() %>% 
+  mutate(`Part Eta Sq`=`Sum Sq`/sum(`Sum Sq`) ) ->
+  mod_BP_ANOVA)
+# pwpp(marginal) # Pairwise P-value plot. Fails for unbalanced design
+emmip(mod_BP, Sample.type ~ Season)
+# summary(as.glht(pairs(marginal))) # fails because of unbalanced design
+
+```
+
+#### Plot all alpha diversity metrics together
+```{r plot alpha, cache=T, fig.width=10, fig.height=6, fig.cap=""}
+Richness_Diversity_long %>% 
+  dplyr::filter(!Metric %in% c("Chao1", "ACE")) %>% 
+  # mutate(across("Metric", ~fct_recode(., "Observed S" = "S obs.", "Inv. Simpson" = "Inv. Simpson", "Berger Parker" = "Berger Parker"))) %>% 
+  mutate(across("Metric", ~fct_relevel(., "Observed S", "Inv. Simpson", "Shannon", "Berger Parker"))) %>% 
+  mutate(across("Season", ~fct_relevel(., "Winter", "Spring", "Summer", "Autumn"))) %>% 
+  droplevels() ->
+  Richness_Diversity_long2plot
+p_alpha <- ggplot() +
+  geom_violin(data = Richness_Diversity_long2plot,
+             aes(
+               x = Sample.type,
+               y = Estimate,
+               ymin = lerr,
+               ymax = herr
+             ), colour = "grey",
+              fill = "grey",
+              alpha = 1 / 3) +
+  geom_jitter(data = Richness_Diversity_long2plot,
+               aes(x = Sample.type,
+               y = Estimate,
+               ymin = lerr,
+               ymax = herr,
+               colour = Field), size = 3, width = 0.2, alpha = 2/3) +
+  # scale_colour_manual(values = Gradient.colours[c(5, 6, 11)], name = "") +
+  scale_colour_locuszoom(name = "") +
+  scale_fill_locuszoom(name = "") +
+  # geom_errorbar(alpha = 1 / 2, width = 0.3) +
+  xlab("") +
+  ylab("") +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    vjust = 0.9,
+    hjust = 1
+  )) +
+  facet_grid(Metric ~ Season, scale = "free") +
+  theme(strip.text = element_text(size = f_size - 4)) +
+  background_grid(major = "y",
+                  minor = "none",
+                  size.major = 0.8) 
+
+bind_rows(`Observed S` = obsS_pairwise, 
+          `Inv. Simpson` = InvSim_pairwise,
+          Shannon = Shannon_pairwise,  
+          `Berger Parker` = BP_pairwise, 
+          .id = "Metric") %>% 
+  bind_cols(., y = rep(c(2300, 700, 7.5, 0.4), each = 12)) %>% 
+  mutate(across(Metric, ~fct_inorder(.x))) ->
+  dat_text
+
+p_alpha <- p_alpha + geom_text(
+  data = dat_text,
+  mapping = aes(x = Sample.type, y = y, label = .group),
+  nudge_x = 0,
+  nudge_y = 0
+)
+print(p_alpha)
+```
+
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
+
+## References

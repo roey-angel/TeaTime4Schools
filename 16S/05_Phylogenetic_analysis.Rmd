@@ -1,0 +1,143 @@
+---
+title: "TeaTime4schools: Joint analysis - bacteria"
+subtitle: "05 Phylogentic analysis"
+author: "Roey Angel"
+email: "roey.angel@bc.cas.cz"
+date: "`r Sys.Date()`"
+bibliography: references.bib
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+always_allow_html: true
+output:
+  rmarkdown::github_document:
+    toc: true
+    toc_depth: 5
+    number_sections: false
+    dev: "png"
+    df_print: "kable"
+    keep_html: true
+---
+
+```{r libraries, include=F}
+# Load libraries
+#.libPaths(c('~/R/library', .libPaths())) # Uncomment if you have no write access to R path
+library(ragg) # Graphic Devices Based on AGG, CRAN v1.1.2 
+library(knitr) # A General-Purpose Package for Dynamic Report Generation in R
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax
+library(rmarkdown) # Dynamic Documents for R
+library(extrafont) # for extra figure fonts
+library(tidyverse) # for dplyr forcats ggplot2 readr tibble
+library(broom) # Convert Statistical Analysis Objects into Tidy Data Frames (should be part of tidyverse)
+library(gridExtra) # Miscellaneous Functions for "Grid" Graphics
+library(cowplot) # wrappers for ggplot
+library(magrittr) # pipes
+library(scales) # Generic plot scaling methods
+library(svglite) # for svg files
+library(vegan) # community ecology methods
+library(doParallel) # parallel backend for the foreach/%dopar% function
+library(phyloseq)
+```
+
+```{r style settings, include=F}
+options(width = 90, knitr.table.format = "html") 
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "ragg_png",
+  fig.ext = "png",
+  dpi = 300,
+#  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "05_Phylogenetic_cache/",
+  fig.path = "05_Phylogenetic_figures/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 14
+font_import(pattern = "DejaVuSans\\.", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+```{r functions, include=F}
+```
+[roey.angel@bc.cas.cz](mailto: roey.angel@bc.cas.cz)  
+
+## Phylogenetic analysis
+This analysis explores the phylogenetic ditribution patters in the different samples, based on the DADA2-produced sequences. Large parts of this script are based on [this protocol](https://f1000research.com/articles/5-1492/v2) and the accompanying publichation by Callahan and colleagues [-@callahan_bioconductor_2016].
+
+### Setting general parameters:
+```{r general parameters}
+set.seed(1000)
+subsamples <- 1000
+min_lib_size <- 5000
+metadata_path <- "./"
+data_path <- "./DADA2_pseudo/"
+Ps_file <- "TeaTime4Schools_16S_filt3.RDS"
+Tree_file <- "FastTree/DADA2.Seqs_filtered.tree"
+Proj_name <- "TeaTime4Schools"
+```
+
+### Reading in raw data
+Read abundance table, taxonomic classification and metadata into a phyloseq object. Also remove sequences detected as contaminanants in [03_Decontamination.html](03_Decontamination.html).
+
+```{r load data, cache=T}
+# read phyloseq object from data file
+Ps_obj_filt3 <- readRDS(paste0(data_path, Ps_file))
+
+# Load phylogenetic tree
+Tree <- read_tree(paste0(data_path, Tree_file))
+
+# generate phyloseq object
+Ps_obj_filt3 <- merge_phyloseq(Ps_obj_filt3,
+                        phy_tree(Tree)
+                        )
+
+Ps_obj_filt3 %>%
+  subset_samples(., sample_sums(Ps_obj_filt3) > min_lib_size) %>% # drop samples below min_lib_size
+  subset_samples(., Field != "Unburied") %>% # drop unburied samples
+  filter_taxa(., function(x)
+    sum(x) > 0, TRUE) -> # remove taxa with 0 abundance
+  Ps_obj_filt3_subset
+```
+
+### Exploring TeaTime dataset features
+
+### Plot phylogenetic trees
+Now let's try to simplify the phylogenetic tree by agglomerating genera
+```{r tree, cache=T}
+# How many genera would be present after filtering?
+length(get_taxa_unique(Ps_obj_filt3_subset, taxonomic.rank = "Family"))
+TeaTime_filt_glom <- tax_glom(Ps_obj_filt3_subset, 
+                             "Family", 
+                             NArm = TRUE)
+
+multiPlotTitleTextSize = 8
+p2tree <- plot_tree(Ps_obj_filt3_subset, method = "treeonly",
+                     ladderize = "left",
+                     title = "Before Agglomeration") +
+  theme(plot.title = element_text(size = multiPlotTitleTextSize))
+p3tree <- plot_tree(TeaTime_filt_glom, method = "treeonly",
+                     ladderize = "left", title = "By Family") +
+  theme(plot.title = element_text(size = multiPlotTitleTextSize))
+
+# group plots together
+grid.arrange(nrow = 1, p2tree, p3tree)
+```
+
+#### Save filtered phyloseq object
+```{r save phyloseq, cache=T}
+saveRDS(Ps_obj_filt3,
+        file = paste0(data_path, Proj_name, "16S_filt3_wTree.Rds"))
+```
+
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
+
+## References

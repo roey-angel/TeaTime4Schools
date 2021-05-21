@@ -1,0 +1,704 @@
+---
+title: "TeaTime4schools: joint analysis - fungi"
+subtitle: "04 Read-depth normalisation attempts for DADA2-based analysis"
+author: "Roey Angel"
+email: "roey.angel@bc.cas.cz"
+date: "`r Sys.Date()`"
+bibliography: references.bib
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+always_allow_html: true
+output:
+  rmarkdown::github_document:
+    toc: true
+    toc_depth: 5
+    number_sections: false
+    dev: "png"
+    df_print: "kable"
+    keep_html: true
+---
+
+
+```{r libraries, include=F}
+# Load libraries
+#.libPaths(c('~/R/library', .libPaths())) # Uncomment if you have no write access to R path
+library(ragg) # Graphic Devices Based on AGG, CRAN v1.1.2 
+library(knitr) # A General-Purpose Package for Dynamic Report Generation in R
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax
+library(rmarkdown) # Dynamic Documents for R
+library(extrafont) # for extra figure fonts
+library(docxtools) # Tools for R Markdown to Docx Documents 
+library(tidyverse) # for dplyr forcats ggplot2 readr tibble
+library(broom) # Convert Statistical Analysis Objects into Tidy Data Frames (should be part of tidyverse)
+library(gridExtra) # Miscellaneous Functions for "Grid" Graphics
+library(cowplot) # wrappers for ggplot
+library(ggsci) # Scientific Journal and Sci-Fi Themed Color Palettes for 'ggplot2'
+library(magrittr) # pipes
+library(scales) # Generic plot scaling methods
+library(svglite) # for svg files
+library(vegan) # community ecology methods
+library(doParallel) # parallel backend for the foreach/%dopar% function
+library(zCompositions) # Treatment of Zeros, Left-Censored and Missing Values in Compositional Data Sets
+library(vsn) # Variance stabilization and calibration for microarray
+library(metagenomeSeq) # Statistical analysis for sparse high-throughput sequencing 
+library(DECIPHER) # Tools for curating, analyzing, and manipulating biological 
+library(phangorn) # Phylogenetic Reconstruction and Analysis
+library(multtest) # Resampling-based multiple hypothesis testing
+library(phyloseq) # Handling and analysis of high-throughput phylogenetic sequence data
+```
+
+```{r style settings, include=F}
+options(width = 90, knitr.table.format = "html") 
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "ragg_png",
+  fig.ext = "png",
+  dpi = 300,
+#  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "04_Normalisation_DADA2_cache/",
+  fig.path = "04_Normalisation_DADA2_figures/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 14
+font_import(pattern = "DejaVuSans\\.", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+```{r functions, include=F}
+MergeSamples <- function(ps = Ps_obj, grouping_name = "Description", fun = "mean") {
+  require(dplyr)
+  require(purrr)
+  require(phyloseq)
+  
+  if (taxa_are_rows(ps)) {ps <- t(ps)} # needs to be in sample-by-species orientation
+  SD2merge <- as_tibble(sample_data(ps)) # grab sample_data
+  org_col_names <- colnames(SD2merge) # retain original sample_data variable order
+  grouping_col <- dplyr::select(SD2merge, group = grouping_name) # grab grouping var
+  # grap factor variables
+  SD2merge %>% 
+    select_if(is.factor) %>% 
+    colnames() ->
+    fct_vars
+  
+  # merge the OTU table
+  ps %>% 
+    otu_table() %>%
+    as(., "matrix") %>% 
+    rowsum(., as_vector(grouping_col)) %>% #sum replicated rows
+    # convert back to otu_table, and return
+    otu_table(., taxa_are_rows = FALSE) ->
+    merged_OTU_table
+  
+  # ps %>% # generalised form but very slow
+  #   otu_table() %>%
+  #   as(., "matrix") %>%
+  #   as.tibble() %>% 
+  #   group_by(as_vector(grouping_col)) %>% 
+  #   summarise_all(., fun)
+  
+  # merge numeric
+  SD2merge %>% 
+    select_if(is.numeric) %>% 
+    bind_cols(grouping_col, .) %>% 
+    group_by(group) %>% 
+    summarise_all(., fun, na.rm = TRUE) -> 
+    numeric_cols
+  
+  # merge other
+  SD2merge %>% 
+    select_if(negate(is.numeric)) %>% 
+    bind_cols(grouping_col, .) %>% 
+    group_by(group) %>% 
+    summarise_all(list(~paste(unique(.), collapse = ",")))  -> 
+    other_cols
+  
+  # join merged numeric and other columns
+  full_join(numeric_cols, other_cols, by = "group") %>% 
+    mutate_at(fct_vars, funs(factor(.))) %>% # return factor type to fct vars
+    column_to_rownames(var = "group") %>% # needed for phyloseq
+    dplyr::select(org_col_names) ->  # order columns like they were
+    merged_SD
+  
+  if (is.null(ps@tax_table)) {
+      merged_ps <- phyloseq(otu_table(merged_OTU_table),
+                        sample_data(merged_SD))
+  } else {
+    merged_ps <- phyloseq(otu_table(merged_OTU_table),
+                          tax_table(ps),
+                          sample_data(merged_SD))
+  }
+  sample_names(merged_ps) %<>% map_chr(., ~str_replace_all(., "\\s", "_")) # safer to avoid spaces in row names
+  return(merged_ps)
+}
+
+GMPR <- function(comm,
+                  intersect.no = 4,
+                  ct.min = 4) {
+  require(matrixStats)
+  # Computes the GMPR size factor
+  #
+  # Args:
+  #   comm: a matrix of counts, row - features (OTUs, genes, etc) , column - sample
+  #   intersect.no: the minimum number of shared features between sample pair, where the ratio is calculated
+  #   ct.min: the minimum number of counts required to calculate ratios （Empirical study found ct.min=4 is suitable)
+  
+  #
+  # Returns:
+  #   a list that contains:
+  #      gmpr： the GMPR size factors for all samples; Samples with distinct sets of features will be output as NA.
+  #      nss:   number of samples with significant sharing (> intersect.no) including itself
+  
+  # mask counts < ct.min
+  comm[comm < ct.min] <- 0
+  
+  if (is.null(colnames(comm))) {
+    colnames(comm) <- paste0('S', 1:ncol(comm))
+  }
+  
+  cat('Begin GMPR size factor calculation ...\n')
+  
+  comm.no <- numeric(ncol(comm))
+  gmpr <- sapply(1:ncol(comm),  function(i) {
+    if (i %% 50 == 0) {
+      cat(i, '\n')
+    }
+    x <- comm[, i]
+    # Compute the pairwise ratio
+    pr <- x / comm
+    # Handling of the NA, NaN, Inf
+    pr[is.nan(pr) | !is.finite(pr) | pr == 0] <- NA
+    # Counting the number of non-NA, NaN, Inf
+    incl.no <- colSums(!is.na(pr))
+    # Calculate the median of PR
+    pr.median <- colMedians(pr, na.rm = TRUE)
+    # Record the number of samples used for calculating the GMPR
+    comm.no[i] <<- sum(incl.no >= intersect.no)
+    # Geometric mean of PR median
+    if (comm.no[i] > 1) {
+      return(exp(mean(log(pr.median[incl.no >= intersect.no]))))
+    } else {
+      return(NA)
+    }
+  })
+  
+  if (sum(is.na(gmpr))) {
+    warning(
+      paste0(
+        'The following samples\n ',
+        paste(colnames(comm)[is.na(gmpr)], collapse = '\n'),
+        '\ndo not share at least ',
+        intersect.no,
+        ' common taxa with the rest samples! ',
+        'For these samples, their size factors are set to be NA! \n',
+        'You may consider removing these samples since they are potentially outliers or negative controls!\n',
+        'You may also consider decreasing the minimum number of intersecting taxa and rerun the procedure!\n'
+      )
+    )
+  }
+  
+  cat('Completed!\n')
+  cat(
+    'Please watch for the samples with limited sharing with other samples based on NSS! They may be outliers! \n'
+  )
+  names(gmpr) <- names(comm.no) <- colnames(comm)
+  return(list(gmpr = gmpr, nss = comm.no))
+}
+
+PlotLibDist <- function(physeq) {
+  ggplot(sample_data(physeq),
+         aes(x = Sample.type, y = Library.size, fill = Replicate)) +
+    geom_bar(stat = "identity",
+             position = "dodge",
+             color = "black") +
+    scale_y_log10(
+      breaks = trans_breaks("log10", function(x)
+        10 ^ x),
+      labels = trans_format("log10", math_format(10 ^ .x))
+    ) +
+    theme(axis.text.x = element_text(
+      angle = 45,
+      vjust = 0.9,
+      hjust = 0.9
+    )) +
+    background_grid(major = "xy", minor = "none") +
+    # scale_fill_locuszoom() +
+    facet_grid(Field ~ Season)
+}
+
+PlotReadHist <- function(OTUmat, b.width = 10) {
+  OTUmat %>%
+    t() %>%
+    as.tibble() %>%
+    gather(key = sample, value = abundance) %>%
+    ggplot(aes(abundance)) +
+    # geom_histogram(binwidth = 1000) +
+    geom_freqpoly(binwidth = b.width) +
+    scale_y_log10()
+}
+
+# phyloseq_CLR code
+# Requires zCompositions package
+# adapted from https://link.springer.com/protocol/10.1007%2F978-1-4939-8728-3_10
+################################################################################
+zero_comp <- function(x) {
+  if (taxa_are_rows(x)) {x <- t(x)}
+  matx <- otu_table(x)
+  # `zCompositions::cmultRepl` expects the samples to be in rows and OTUs to be in columns 
+  matxzc <- zCompositions::cmultRepl(matx, method = "CZM", output = "p-counts")
+  otu_table(x) <- otu_table(matxzc, taxa_are_rows = FALSE)
+  return(x)
+}
+# CLR definition
+geometric_mean <- function(x) {
+  exp(mean(log(x)))
+}
+clr = function(x, base = 2) {
+  x <- log((x / geometric_mean(x)), base)
+}
+phyloseq_CLR <- function(physeq) {
+  suppressMessages({physeq <- zero_comp(physeq)})
+  return(transform_sample_counts(physeq, fun = clr))
+}
+```
+[roey.angel@bc.cas.cz](mailto: roey.angel@bc.cas.cz)  
+
+## Read-depth distribution and normalisation
+This analysis tests the effect of library read-depth distribution on the community composition. It then performs various read-depth normalisation methods on the DADA2 zOTU-based dataset, for determining the optimal strategy to handle the bias of uneven read distribution. 
+
+### Setting general parameters:
+```{r general parameters}
+set.seed(1000)
+min_lib_size <- 5000
+metadata_path <- "./"
+data_path <- "./DADA2_pseudo/"
+Metadata_table <- "TeaTime_joint_Fungi_metadata.csv"
+Seq_table <- "DADA2.seqtab_nochim.tsv"
+```
+
+### Reading in raw data and inspecting read-depth variations
+Read abundance table, taxonomic classification and metadata into a phyloseq object. Also remove sequences detected as contaminanants in [03_Decontamination.html](03_Decontamination.html).
+
+```{r load data, cache=T}
+# read OTU mat from data file
+Raw_data <- read_tsv(paste0(data_path, Seq_table), 
+                        trim_ws = TRUE)
+contaminant_seqs <- read_csv(paste0(data_path, "decontam_contaminants.csv"), 
+                        trim_ws = TRUE,
+                        col_names = FALSE)
+
+Raw_data %<>% # remove contaminant OTUs. 
+  # .[, -grep("CTRL", colnames(.))] %>% # remove ext. cont. 
+  .[!(Raw_data$`#OTU` %in% contaminant_seqs$X1), ] 
+
+Raw_data[, 2:ncol(Raw_data)] %>% 
+  t() %>% 
+  as.data.frame() -> abundance_mat # convert to abundance matrix
+colnames(abundance_mat) <- pull(Raw_data, "#OTU") # add sequence names
+
+# Read metadata file
+read_csv(paste0(metadata_path, Metadata_table),
+         trim_ws = TRUE) %>%
+  mutate_at(
+    c(
+      "Workshop",
+      "Season",
+      "Run",
+      "Type",
+      "Sample type",
+      "Field",
+      "Replicate",
+      "Control",
+      "Gene"
+    ),
+    funs(factor(.))
+  ) %>% 
+  mutate_at(c("Extr. Date", "PCR products_ITS_send for seq"), funs(as.Date(., "%d.%m.%Y"))) ->
+  Metadata
+Metadata$Season %<>% fct_relevel("Winter", "Spring", "Summer", "Autumn")
+Metadata$Read1_file <- str_replace(Metadata$Read1_file, "(.*)_L001_R1_001.fastq.gz|\\.1\\.fastq.gz", "\\1")
+Metadata <- Metadata[Metadata$Read1_file %in% rownames(abundance_mat), ] # remove metadata rows if the samples did not go through qual processing
+
+# Order abundance_mat samples according to the metadata
+sample_order <- match(rownames(abundance_mat), Metadata$Read1_file)
+abundance_mat %<>% 
+  rownames_to_column('sample_name') %>% 
+  arrange(., sample_order) %>% 
+  column_to_rownames('sample_name') # needed for phyloseq
+
+Metadata$Library.size <- rowSums(abundance_mat)
+Metadata <- data.frame(row.names = Metadata$Read1_file, Metadata)
+
+# generate phyloseq object
+Ps_obj <- phyloseq(otu_table(abundance_mat, taxa_are_rows = FALSE),
+                        sample_data(Metadata)
+                        )
+Ps_obj <- filter_taxa(Ps_obj, function(x) sum(x) > 0, TRUE) # remove 0 abundance taxa
+Ps_obj <- subset_samples(Ps_obj, sample_sums(Ps_obj) > 0) # remove 0 abundance samples
+# Remove mock and control samples
+Ps_obj <- subset_samples(Ps_obj, Type != "Control" & Type != "Mock")
+
+# Create a grouping variable for merging
+sample_data(Ps_obj) %<>% 
+  as(., "data.frame") %>% 
+  # get_variable(., c("Sample.type", "Field", "Season", "Replicate")) %>% 
+  unite(., "Description", c("Sample.type", "Field", "Season", "Replicate"), remove = FALSE)
+sample_data(Ps_obj)$Description %<>% as_factor(.)
+
+# merged_Ps_obj <- merge_samples(Ps_obj, "Description")
+# merged_SD <- merge_samples(sample_data(Ps_obj), "Description")
+Ps_obj_merged <- MergeSamples(Ps_obj, grouping_name = "Description")
+```
+
+### Exploring Ps_obj dataset features
+First let's look at the count data distribution
+```{r plot abundance, cache=T}
+PlotLibDist(Ps_obj)
+
+get_variable(Ps_obj) %>% 
+  remove_rownames %>% 
+  dplyr::select(Sample.name, Library.size) %>% 
+  as(., "data.frame") %>% 
+  format_engr() %>% 
+  kable(., col.names = c("Sample name", "Library size")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F)
+```
+The figure and table indicate only a small deviation in the number of reads per samples.
+
+```{r mod abundance, cache=T, fig.width=4, fig.asp=.8}
+(mod1 <- adonis(vegdist(otu_table(Ps_obj), method = "bray") ~ Library.size,
+  data = get_variable(Ps_obj),
+  permutations = 999
+))
+
+PlotReadHist(as(otu_table(Ps_obj), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj))) > 0)
+meanSdPlot(as.matrix(log2(t(otu_table(Ps_obj))[notAllZero, ] + 1)))
+```
+Nevertheless, modelling library size shows a significant effect of read depth on the community structure (explaining only `r percent(mod1$aov.tab$R2[1])`).
+The reads histogram shows as expected a highly sparse and skewed sequence matrix.
+The mean vs SD also shows as expected large dependency of SD on the mean reads of a sequence across all samples.
+
+### Try various normalisation methods
+
+```{r test s pruning, cache=T}
+# subsample libraries from 1000 to max(sample_sums(Ps_obj)) and test
+for (i in seq(1000, max(sample_sums(Ps_obj)), 1000)) {
+  min_seqs <<- i
+  Ps_obj_pruned <- subset_samples(Ps_obj, sample_sums(Ps_obj) > i)
+  mod <-
+    adonis2(vegdist(otu_table(Ps_obj_pruned), method = "bray") ~ sample_sums(Ps_obj_pruned), # I use adonis2 because it gives a data.frame
+      data = get_variable(Ps_obj_pruned),
+      permutations = 999
+    )
+  Pval <- tidy(mod)$p.value[1]
+  if (Pval > 0.05)
+    break()
+}
+```
+
+Only by subsetting the samples to a minimum library size of $`r min_seqs`$ sequences do we get independence from library size but this forces us to drop $`r sum(sample_sums(Ps_obj) < i)`$ out of $`r nsamples(Ps_obj)`$ samples.
+
+Let's see the effect of this
+```{r effect s pruning, cache=T, fig.width=4, fig.asp=.8}
+Ps_obj_pruned_harsh <- subset_samples(Ps_obj_merged, sample_sums(Ps_obj) > i)
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_harsh), method = "bray") ~ Library.size,
+  data =
+    get_variable(Ps_obj_pruned_harsh),
+  permutations = 999
+)
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_harsh), method = "bray") ~ Field + Sample.type * Season,
+  data =
+    get_variable(Ps_obj_pruned_harsh),
+  permutations = 999
+)
+
+PlotReadHist(as(otu_table(Ps_obj_pruned_harsh), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_harsh))) > 0)
+meanSdPlot(as.matrix(log2(t(otu_table(Ps_obj_pruned_harsh))[notAllZero, ] + 1)))
+```
+
+```{r effect s pruning - ordinate, cache=T, fig.width=8, fig.aspect=.5}
+Pruned_ord <- ordinate(Ps_obj_pruned_harsh, "CAP", "bray", formula = Ps_obj_pruned_harsh ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_harsh, Pruned_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field") +
+  facet_wrap(~ Season) #+
+  # geom_point(size = 5) +
+  # geom_text(size = 5) 
+```
+
+Instead let's drop all samples below `r min_lib_size` reads and do try some correction methods for library depths
+```{r prune to min_lib_size reads, cache=T}
+Ps_obj_pruned_min <- subset_samples(Ps_obj_merged, sample_sums(Ps_obj_merged) > min_lib_size)
+Ps_obj_pruned_min <- filter_taxa(Ps_obj_pruned_min, function(x) sum(x) > 0, TRUE)
+```
+
+#### Rarefaction
+```{r test rarefaction, cache=T}
+Ps_obj_pruned_rared <-
+  rarefy_even_depth(
+  Ps_obj_pruned_min,
+  sample.size = min(sample_sums(Ps_obj_pruned_min)),
+  rngseed = FALSE,
+  replace = FALSE
+  )
+sample_data(Ps_obj_pruned_rared)$Library.size <- sample_sums(Ps_obj_pruned_rared)
+# Ps_obj_pruned_rared <- Ps_obj_pruned_min
+# Ps_obj_pruned_min %>%
+#   otu_table() %>%
+#   rowSums() %>%
+#   min() %>%
+#   rrarefy(otu_table(Ps_obj_pruned_min), .) ->
+#   otu_table(Ps_obj_pruned_rared)
+
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_rared), method = "bray") ~ Field + Sample.type * Season,
+  data =
+    get_variable(Ps_obj_pruned_rared),
+  permutations = 999
+)
+
+PlotLibDist(Ps_obj_pruned_rared)
+```
+```{r test rarefaction diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_pruned_rared), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_rared))) > 0)
+meanSdPlot(as.matrix(log2(t(otu_table(Ps_obj_pruned_rared))[notAllZero, ] + 1)))
+```
+
+```{r rarefaction - ordinate, cache=T, fig.width=8, fig.aspect=.5}
+Rared_ord <- ordinate(Ps_obj_pruned_rared, "CAP", "bray", formula = Ps_obj_pruned_rared ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_rared, Rared_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field")  +
+  facet_wrap(~ Season) #+
+  # geom_point(size = 5) 
+```
+
+#### GMPR [@chen_gmpr:_2017]
+```{r GMPR, cache=T}
+Ps_obj_pruned_GMPR <- Ps_obj_pruned_min
+Ps_obj_pruned_min %>%
+  otu_table(.) %>%
+  t() %>%
+  as(., "matrix") %>%
+  GMPR() ->
+  GMPR_factors
+
+Ps_obj_pruned_min %>%
+  otu_table(.) %>%
+  t() %*% diag(1 / GMPR_factors$gmpr) %>%
+  t() %>%
+  as.data.frame(., row.names = sample_names(Ps_obj_pruned_min)) %>%
+  otu_table(., taxa_are_rows = FALSE) ->
+  otu_table(Ps_obj_pruned_GMPR)
+sample_data(Ps_obj_pruned_GMPR)$Library.size <- sample_sums(Ps_obj_pruned_GMPR)
+
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_GMPR), method = "bray") ~ Library.size,
+  data =
+    get_variable(Ps_obj_pruned_GMPR),
+  permutations = 999
+)
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_GMPR), method = "bray") ~ Field + Sample.type * Season,
+  data =
+    get_variable(Ps_obj_pruned_GMPR),
+  permutations = 999
+)
+
+PlotLibDist(Ps_obj_pruned_GMPR)
+```
+```{r GMPR diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_pruned_GMPR), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_GMPR))) > 0)
+meanSdPlot(as.matrix(log2(t(otu_table(Ps_obj_pruned_GMPR))[notAllZero, ] + 1)))
+```
+
+```{r GMPR - ordinate, cache=T, fig.width=8, fig.aspect=.5}
+GMPR_ord <- ordinate(Ps_obj_pruned_GMPR, "CAP", "bray", formula = Ps_obj_pruned_GMPR ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_GMPR, GMPR_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field") +
+  facet_wrap(~ Season)
+```
+
+#### Cumulative sum scaling normalization [@paulson_differential_2013]
+```{r cumsum, cache=T}
+# Cumulative sum scaling normalization
+Ps_obj_pruned_CSS <- Ps_obj_pruned_min
+
+Ps_obj_pruned_CSS %>%
+  otu_table(.) %>%
+  t() %>%
+  as(., "matrix") %>%
+  newMRexperiment(.) ->
+  mr_obj
+p <- cumNormStatFast(mr_obj)
+cumNormMat(mr_obj, p = p) %>% 
+  otu_table(., taxa_are_rows = TRUE) ->
+  otu_table(Ps_obj_pruned_CSS)
+
+# Did any OTU produce Na?
+Ps_obj_pruned_CSS %>% 
+  otu_table() %>% 
+  as(., "matrix") %>% 
+  t(.) %>% 
+  apply(., 2, function(x) !any(is.na(x))) %>% 
+  unlist() ->
+  OTUs2keep
+Ps_obj_pruned_CSS <- prune_taxa(OTUs2keep, Ps_obj_pruned_CSS)
+sample_data(Ps_obj_pruned_CSS)$Library.size <- sample_sums(Ps_obj_pruned_CSS)
+
+# adonis(
+#   vegdist(otu_table(Ps_obj_pruned_CS), method = "bray") ~ Library.size,
+#   data =
+#     as(sample_data(Ps_obj_pruned_CS), "data.frame"),
+#   permutations = 999
+# )
+# adonis(
+#   vegdist(otu_table(Ps_obj_pruned_CS), method = "bray") ~ Field + Sample.type * Season,
+#   data =
+#     as(sample_data(Ps_obj_pruned_CS), "data.frame"),
+#   permutations = 999
+# )
+
+PlotLibDist(Ps_obj_pruned_CSS)
+```
+```{r cumsum diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_pruned_CSS), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_CSS))) > 0)
+meanSdPlot(as(log2(t(otu_table(Ps_obj_pruned_CSS))[notAllZero, ] + 1), "matrix"))
+```
+
+```{r CS - ordinate, cache=T}
+CSS_ord <- ordinate(Ps_obj_pruned_CSS, "CAP", "bray", formula = Ps_obj_pruned_CS ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_CSS, CSS_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field") +
+  facet_wrap(~ Season)
+```
+
+#### Standardize abundances to the median sequencing depth (and convert to proportion)
+```{r median, cache=T}
+Ps_obj_pruned_min %>%
+  otu_table(.) %>%
+  as(., "matrix") %>%
+  rowSums() %>% 
+  median() ->
+  total
+standf = function(x, t=total) round(t * (x / sum(x)))
+Ps_obj_pruned_median <- transform_sample_counts(Ps_obj_pruned_min, standf) # Standardize abundances to median sequencing depth
+sample_data(Ps_obj_pruned_median)$Library.size <- sample_sums(Ps_obj_pruned_median)
+
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_median), method = "bray") ~ Library.size,
+  data =
+    get_variable(Ps_obj_pruned_median),
+  permutations = 999
+)
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_median), method = "bray") ~ Field + Sample.type * Season,
+  data =
+    get_variable(Ps_obj_pruned_median),
+  permutations = 999
+)
+
+PlotLibDist(Ps_obj_pruned_median)
+```
+```{r median diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_pruned_median), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_median))) > 0)
+meanSdPlot(as(log2(t(otu_table(Ps_obj_pruned_median))[notAllZero, ] + 1), "matrix"))
+```
+
+```{r median - ordinate, cache=T, fig.width=8, fig.aspect=.5}
+Median_ord <- ordinate(Ps_obj_pruned_median, "CAP", "bray", formula = Ps_obj_pruned_median ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_median, Median_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field") +
+  facet_wrap(~ Season)
+```
+
+#### Standardize abundances using log transformation for variance stabilisation
+```{r log, cache=T}
+Ps_obj_pruned_log <- transform_sample_counts(Ps_obj_pruned_min, function(x) log(1 + x))
+
+# Ps_obj_pruned_rlog <- Ps_obj_pruned_min
+# Ps_obj_pruned_min %>%
+#   transform_sample_counts(., function(x) (1 + x)) %>% # add pseudocount
+#   phyloseq_to_deseq2(., ~ Spill) %>%
+#   rlog(., blind = TRUE , fitType = "parametric") %>%
+#   assay() %>%
+#   otu_table(, taxa_are_rows = TRUE) ->
+#   otu_table(Ps_obj_pruned_rlog)
+sample_data(Ps_obj_pruned_log)$Library.size <- sample_sums(Ps_obj_pruned_log)
+
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_log), method = "bray") ~ Library.size,
+  data =
+    get_variable(Ps_obj_pruned_log),
+  permutations = 999
+)
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_log), method = "bray") ~ Field + Sample.type * Season,
+  data =
+    get_variable(Ps_obj_pruned_log),
+  permutations = 999
+)
+
+PlotLibDist(Ps_obj_pruned_log)
+```
+```{r log diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_pruned_log), "matrix"), b.width = 0.1)
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_log))) > 0)
+meanSdPlot(as(log2(t(otu_table(Ps_obj_pruned_log))[notAllZero, ] + 1), "matrix"))
+```
+
+```{r log - ordinate, cache=T, fig.width=8, fig.aspect=.5}
+Rlog_ord <- ordinate(Ps_obj_pruned_log, "CAP", "bray", formula = Ps_obj_pruned_log ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_log, Rlog_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field") +
+  facet_wrap(~ Season)
+```
+
+### Standardize abundances using Centered-Log-Ratio transformation for variance stabilisation [@fernandes_anova-like_2013]
+```{r clr, cache=T}
+Ps_obj_pruned_CLR <- phyloseq_CLR(Ps_obj_pruned_min)
+
+sample_data(Ps_obj_pruned_CLR)$Library.size <- sample_sums(Ps_obj_pruned_CLR)
+
+qplot(rowSums(otu_table(Ps_obj_pruned_CLR)), geom = "histogram") + 
+  xlab("Library size")
+
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_CLR), method = "euclidean") ~ Library.size,
+  data =
+    get_variable(Ps_obj_pruned_CLR),
+  permutations = 999
+)
+adonis(
+  vegdist(otu_table(Ps_obj_pruned_CLR), method = "euclidean") ~ Field + Sample.type * Season,
+  data =
+    get_variable(Ps_obj_pruned_CLR),
+  permutations = 999
+)
+
+PlotLibDist(Ps_obj_pruned_CLR)
+```
+```{r clr diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_pruned_CLR), "matrix"), b.width = 0.1)
+notAllZero <- (rowSums(t(otu_table(Ps_obj_pruned_CLR))) > 0)
+meanSdPlot(as(log2(t(otu_table(Ps_obj_pruned_CLR))[notAllZero, ] + 1), "matrix"))
+```
+
+```{r clr - ordinate, cache=T, fig.width=8, fig.aspect=.5}
+CLR_ord <- ordinate(Ps_obj_pruned_CLR, "RDA", formula = Ps_obj_pruned_CLR ~ Field + Sample.type * Season)
+plot_ordination(Ps_obj_pruned_CLR, CLR_ord, type = "samples", color = "Sample.type", label = "Sample.name", shape = "Field") +
+  facet_wrap(~ Season)
+```
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
+
+## References

@@ -1,0 +1,254 @@
+---
+title: "TeaTime4Schools joint analysis - bacteria"
+subtitle: "02 Decontaminate dataset"
+author: "Roey Angel"
+email: "roey.angel@bc.cas.cz"
+date: "`r Sys.Date()`"
+bibliography: references.bib
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+always_allow_html: true
+output:
+  rmarkdown::github_document:
+    toc: true
+    toc_depth: 5
+    number_sections: false
+    dev: "png"
+    df_print: "kable"
+    keep_html: true
+---
+
+```{r libraries, include=F}
+# Load libraries
+#.libPaths(c('~/R/library', .libPaths())) # Uncomment if you have no write access to R path
+library(ragg) # Graphic Devices Based on AGG, CRAN v1.1.2 
+library(knitr) # A General-Purpose Package for Dynamic Report Generation in R
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax
+library(extrafont) # for extra figure fonts
+library(rmarkdown) # Dynamic Documents for R
+library(tidyverse) # for dplyr forcats ggplot2 readr tibble
+library(cowplot) # wrappers for ggplot
+library(magrittr) # pipes
+library(scales) # Generic plot scaling methods
+library(svglite) # An 'SVG' Graphics Device, CRAN v2.0.0 
+library(phyloseq) # Handling and analysis of high-throughput microbiome census data, Bioconductor v1.34.0
+library(decontam) # Identify Contaminants in Marker-gene and Metagenomics Sequencing Data, Bioconductor v1.10.0 
+```
+```{r style settings, echo=FALSE, message=FALSE, warning=FALSE, results="asis"}
+options(width = 90, knitr.table.format = "html") 
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "ragg_png",
+  fig.ext = "png",
+  dpi = 300,
+#  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "02_Decontamination_cache/",
+  fig.path = "02_Decontamination_figures/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 14
+font_import(pattern = "DejaVuSans", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+```{r functions, include=F}
+```
+
+[roey.angel@bc.cas.cz](mailto: roey.angel@bc.cas.cz) 
+
+## Preliminary analysis of MiSeq amplicon data for Evrona project
+Decontamination of sequence library based on [Introduction to decontam](https://benjjneb.github.io/decontam/vignettes/decontam_intro.html) and Davis and colleagues [-@davis_simple_2017]. Decontamination is based on correlating sequence abundance frequencies to initial DNA concentrations used for PCR and also on examining sequence abundance prevalence patterns in the negative control samples.
+
+### Setting general parameters:
+```{r general parameters}
+set.seed(1000)
+metadata_path <- "./"
+data_path <- "./DADA2_pseudo/"
+Metadata_table <- "TeaTime_joint_Bacteria_metadata.csv"
+Seq_table <- "DADA2.seqtab_nochim.tsv"
+# Metadata_table <- ""
+```
+
+### Reading in raw data and generate phyloseq object
+```{r load data, cache=T}
+# read OTU mat from data file
+Raw_data <- read_tsv(paste0(data_path, Seq_table), 
+                        trim_ws = TRUE)
+
+Raw_data[, 2:ncol(Raw_data)] %>% 
+  t() %>% 
+  as.data.frame() -> abundance_mat # convert to abundance matrix
+colnames(abundance_mat) <- pull(Raw_data, "#OTU") # add sequence names
+
+# get short names of samples
+# abundance_mat %>% 
+#   rownames() %>% 
+#   str_remove("^Roey[0-9]{3,}-?") %>% 
+#   str_split("_", simplify = T) %>% 
+#   .[, 1] ->
+#   short_names
+
+# Read metadata file
+Metadata <- read_csv(paste0(metadata_path, Metadata_table),
+                        trim_ws = TRUE)
+Metadata$Control %<>% fct_relevel("Biological", after = 1)
+
+Metadata$Read1_file <- str_replace(Metadata$Read1_file, "(.*)_L001_R1_001.fastq.gz|\\.1\\.fastq.gz", "\\1")
+Metadata <- Metadata[Metadata$Read1_file %in% rownames(abundance_mat), ] # remove metadata rows if the samples did not go through qual processing
+Metadata %<>% mutate(`Conc. (ng/ul)` = replace(`Conc. (ng/ul)`, which(`Conc. (ng/ul)` == 0 | `Conc. (ng/ul)` < 0), 0.001)) # replace 0 conc. with 0.001
+
+# Order abundance_mat samples according to the metadata
+sample_order <- match(rownames(abundance_mat), Metadata$Read1_file)
+abundance_mat %<>% arrange(., sample_order)
+rownames(abundance_mat) <- Metadata$Read1_file # needed for pyhloseq
+
+Metadata$LibrarySize <- rowSums(abundance_mat)
+Metadata <- data.frame(row.names = Metadata$Read1_file, Metadata)
+
+# generate phyloseq object
+Ps_obj <- phyloseq(otu_table(abundance_mat, taxa_are_rows = FALSE),
+                        sample_data(Metadata)
+                        )
+Ps_obj <- filter_taxa(Ps_obj, function(x) sum(x) > 0, TRUE) # remove 0 abundance taxa
+Ps_obj <- subset_samples(Ps_obj, sample_sums(Ps_obj) > 0) # remove 0 abundance samples
+```
+
+### Inspect Library Sizes
+```{r Library Sizes, cache=T}
+Ps_obj_df <- get_variable(Ps_obj) # Put sample_data into a ggplot-friendly data.frame
+Ps_obj_df <- Ps_obj_df[order(Ps_obj_df$LibrarySize), ]
+Ps_obj_df$Index <- seq(nrow(Ps_obj_df))
+ggplot(data = Ps_obj_df, 
+       aes(x = Index, y = LibrarySize, color = Control)) + 
+  geom_point() +
+  scale_y_log10(breaks = c(
+    min(Ps_obj_df$Lib.size),
+    10,
+    100,
+    1000,
+    5000,
+    10000,
+    ceiling(max(Ps_obj_df$Lib.size) / 10000) * 10000
+    ))
+summary(sample_sums(Ps_obj))
+summary(taxa_sums(Ps_obj))
+```
+
+No sample has 0 counts and only two controls have more sequences than any true sample. 
+
+This is how many reads remained per control sample after DADA2 pipeline 
+```{r}
+Ps_obj %>% 
+  subset_samples(., Control == "TRUE") %>% 
+  sample_sums() %>% 
+  sort() %>% 
+  as_tibble(rownames = "Sample") %>% 
+  rename(Reads = value) %>% 
+  kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F)
+```
+
+Summary of all nono-control samples
+```{r}
+# Ps_obj <-
+  # subset_samples(Ps_obj, Sample.name != names(which(sample_sums(Ps_obj) == 0)))
+Ps_obj %>% 
+  subset_samples(., Control == "FALSE") %>% 
+  sample_sums(.) %>% 
+  summary()
+```
+
+###  Identify contaminants - Frequency
+Use the distribution of the frequency of each sequence feature as a function of the input DNA concentration to identify contaminants.
+
+```{r frequency, cache=T}
+contamdf.freq <-
+  isContaminant(Ps_obj, method = "frequency", conc = "Conc...ng.ul.")
+# print(contamdf.freq)
+# How many contaminants are found?
+table(contamdf.freq$contaminant)
+# Which ones?
+contamdf.freq %>% 
+  rownames_to_column(., var = "ESV") %>% 
+  filter(contaminant == TRUE) %>% 
+  kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F)
+```
+
+Plot the frequency of the first 20 non-contaminant ESVs against the DNA concentration, as an example.
+```{r plot frequency 1, cache=T, fig.height=20, fig.width=20}
+plot_frequency(Ps_obj, taxa_names(Ps_obj)[which(!contamdf.freq$contaminant)[1:20]], conc = "Conc...ng.ul.")
+```
+
+Plot the frequency of the the first 20 contaminant sequences against the DNA concentration.
+```{r plot frequency 2, cache=T, fig.height=20, fig.width=20}
+plot_frequency(Ps_obj, taxa_names(Ps_obj)[which(contamdf.freq$contaminant)[1:20]], conc = "Conc...ng.ul.")
+```
+
+The frequency analysis detected $`r sum(contamdf.freq$contaminant)`$ sequences as contaminants.
+
+###  Identify contaminants - Prevalence
+Use the prevalence of sequences found in the control samples (no-template controls) to identify contaminants.
+```{r prevalence, cache=T}
+Ps_obj_noBioControl <- subset_samples(Ps_obj, Control != "Biological") # remove "Biological control" samples
+sample_data(Ps_obj_noBioControl)$Control <- sample_data(Ps_obj_noBioControl)$Control == "TRUE" # convert to logical
+contamdf.prev <- isContaminant(Ps_obj_noBioControl, method = "prevalence", neg = "Control")
+# How many contaminants are found?
+table(contamdf.prev$contaminant)
+# Which ones?
+contamdf.prev %>% 
+  rownames_to_column(., var = "ESV") %>% 
+  filter(contaminant == TRUE) %>% 
+  kable(.) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), full_width = F)
+
+# And using a more aggrssive threshold
+contamdf.prev05 <- isContaminant(Ps_obj_noBioControl, method = "prevalence", neg = "Control", threshold = 0.5)
+table(contamdf.prev05$contaminant)
+
+# Make phyloseq object of presence-absence in negative controls
+Ps_obj.pa <-
+  transform_sample_counts(Ps_obj, function(abund)
+    1 * (abund > 0))
+Ps_obj.pa.neg <-
+  prune_samples(sample_data(Ps_obj.pa)$Control == "TRUE", Ps_obj.pa)
+Ps_obj.pa.pos <-
+  prune_samples(sample_data(Ps_obj.pa)$Control == "FALSE", Ps_obj.pa)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <-
+  data.frame(
+    pa.pos = taxa_sums(Ps_obj.pa.pos),
+    pa.neg = taxa_sums(Ps_obj.pa.neg),
+    contaminant = contamdf.prev$contaminant
+  )
+ggplot(data = df.pa, aes(x = pa.neg, y = pa.pos, color = contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+```
+
+The prevalence analysis detected $`r sum(contamdf.prev$contaminant)`$ sequences as contaminants.
+In total $`r sum(contamdf.freq$contaminant) + sum(contamdf.prev$contaminant)`$ were detected as contaminants and will be removed.
+
+### Save contaminant sequence names
+```{r save, cache=T}
+c(taxa_names(Ps_obj)[which(contamdf.freq$contaminant)],
+  taxa_names(Ps_obj)[which(contamdf.prev$contaminant)]) %>%
+  data.frame() %>%
+  write_csv(., 
+            paste0(data_path, "decontam_contaminants.csv"), 
+            col_names = FALSE)
+```
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
+
+## References
+

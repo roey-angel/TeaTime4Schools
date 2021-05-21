@@ -1,0 +1,391 @@
+---
+title: "TeaTime4schools: Joint analysis - bacteria"
+subtitle: "TBI S and k comparison"
+author: "Anne Daebeler Roey Angel"
+date: "`r Sys.Date()`"
+bibliography: references.bib
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+output:
+  rmarkdown::html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 5
+    keep_md: true
+    number_sections: false
+    highlight: "pygments"
+    theme: "flatly"
+    dev: "png"
+    df_print: "kable"
+    fig_caption: true
+    code_folding: "show"
+---
+
+```{r libraries, include=F}
+library(ragg) # Graphic Devices Based on AGG, CRAN v1.1.2 
+library(knitr) 
+library(extrafont)
+library(tidyverse)
+library(grid)
+library(car)
+library(emmeans)
+library(multcomp)
+library(ggsci)
+library(cowplot)
+# library(Hmisc)
+```
+
+```{r style settings, include=F}
+options(width = 90, knitr.table.format = "html") 
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "ragg_png",
+  fig.ext = "png",
+  dpi = 300,
+           #  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "TBI_cache/",
+  fig.path = "TBI_figures/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 14
+font_import(pattern = "DejaVuSans\\.", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+```{r functions, include=F}
+PlotLmResid <- function(lm.df, which = c(1:6), mfrow = c(3, 2)){
+
+  require(ggplot2)
+  require(grid)
+  require(car)
+  if (length(levels(as.factor(lm.df$.fitted))) < 10) {# if number of unique x values is <10 just draw a line through the means
+    smoother <- stat_summary(fun.y = mean, colour = "red", geom = "line")
+  } else smoother <- stat_smooth(method = "loess", geom = "smooth", se = FALSE, colour = "firebrick", size = 1)
+  
+  # residuals vs fitted
+  g1 <- ggplot(lm.df, aes(.fitted, .resid)) +
+    geom_point()  +
+    smoother + 
+    geom_hline(yintercept = 0, linetype = 2, size = .2) +
+    scale_x_continuous("Fitted Values") +
+    scale_y_continuous("Residual") +
+    labs(title = "Residuals vs Fitted")
+  
+  # normal qq
+  a <- quantile(lm.df$.stdresid, c(0.25, 0.75), na.rm = TRUE)
+  b <- qnorm(c(0.25, 0.75))
+  slope <- diff(a)/diff(b)
+  int <- a[1] - slope * b[1]
+  g2 <- ggplot(lm.df, aes(sample = .stdresid)) +
+    stat_qq() +
+    geom_abline(slope = slope, intercept = int, colour = "firebrick", size = 1) +
+      scale_x_continuous("Theoretical Quantiles") +
+      scale_y_continuous("Standardized Quantiles") +
+      labs(title = "Normal Q-Q")
+ 
+  # scale-location
+  g3 <- ggplot(lm.df, aes(.fitted, sqrt(abs(.stdresid)))) +
+    geom_point() +
+    smoother +
+    scale_x_continuous("Fitted Values") +
+    scale_y_continuous("Root of Standardized Residuals") +
+    labs(title = "Scale-Location")
+ 
+  # residuals vs leverage
+  g4 <- ggplot(lm.df, aes(factors, .stdresid)) +
+    geom_point() +
+    smoother +
+    geom_hline(yintercept = 0, linetype = 2, size = .2) +
+    scale_x_continuous("Factor Level Combinations") +
+    scale_y_continuous("Standardized Residuals") +
+    labs(title = "Residuals vs Factor Levels")
+ 
+#   # cook's distance
+#   g5 <-  ggplot(lm.df, aes(rows, .cooksd, ymin=0, ymax=.cooksd)) +
+#     geom_point() + geom_linerange() +
+#     scale_x_continuous("Observation Number") +
+#     scale_y_continuous("Cook's distance") +
+#     labs(title="Cook's Distance")  
+  
+  # cooksd vs leverage
+  g5 <- ggplot(lm.df, aes(factors, .cooksd)) +
+    geom_point() +
+    smoother +
+    scale_x_continuous("Factor Level Combinations") +
+    scale_y_continuous("Cook's distance") +
+    labs(title = "Cook's dist vs Leverage")
+  
+  # g6 <- PlotACF(lm.df)
+  bw <- diff(range(lm.df$.resid)) / (2 * IQR(lm.df$.resid) / length(lm.df$.resid) ^ (1/3))
+  sshist <- function(x){ # optimise bins
+  # 2006 Author Hideaki Shimazaki
+  # Department of Physics, Kyoto University
+  # shimazaki at ton.scphys.kyoto-u.ac.jp
+	N <- 2 : 100
+	C <- numeric(length(N))
+	D <- C
+
+	for (i in 1:length(N)) {
+		D[i] <- diff(range(x)) / N[i]
+
+		edges = seq(min(x), max(x), length=N[i])
+		hp <- hist(x, breaks = edges, plot=FALSE)
+		ki <- hp$counts
+
+		k <- mean(ki)
+		v <- sum((ki-k) ^ 2) / N[i]
+
+		C[i] <- (2 * k-v) / D[i] ^ 2	#Cost Function
+	}
+
+	idx <- which.min(C)
+	optD <- D[idx]
+
+	bins <- seq(min(x), max(x), length=N[idx])
+	# h = hist(x, breaks = bins)
+	# rug(x)
+
+	return(bins)
+  }
+  
+  bins <- sshist(lm.df$.resid)
+  g6 <- ggplot(lm.df, aes(.resid)) + 
+    geom_histogram(breaks = bins)
+ 
+  plots <- list(g1, g2, g3, g4, g5, g6)
+ 
+  # making the plots
+  grid.newpage()
+ 
+  if (prod(mfrow) > 1) {
+    mypos <- expand.grid(1:mfrow[1], 1:mfrow[2])
+    mypos <- mypos[with(mypos, order(Var1)), ]
+    pushViewport(viewport(layout = grid.layout(mfrow[1], mfrow[2])))
+    formatter <- function(.){}
+  } else {
+    mypos <- data.frame(matrix(1, length(which), 2))
+    pushViewport(viewport(layout = grid.layout(1, 1)))
+    formatter <- function(.) {
+      .dontcare <- readline("Hit <Return> to see next plot: ")
+      grid.newpage()
+    }
+  }
+ 
+  j <- 1
+  for (i in which) {
+    formatter()
+    print(plots[[i]], vp = viewport(layout.pos.row = mypos[j, ][1], layout.pos.col = mypos[j, ][2]))
+    j <- j + 1
+  }
+}
+
+TestAlphaV3 <- function(data2test = Richness_Diversity_long_sub,
+                        response_name = "Estimate",
+                        factor_names = c("Sample.type", "Season", "Field"),
+                        boxcox.trans = FALSE) {
+  
+    require(dplyr)
+      mod_lm <-
+        aov(as.formula(paste(
+          response_name,
+          paste(factor_names[1], factor_names[2], sep = " * "),
+          sep = " ~ "
+        )), data2test)
+    # }
+    
+    if (boxcox.trans) {
+      # employ boxcox transformation then recalculate model
+      print("Performing Box-Cox transformation of the data")
+      lambdas <- boxcox(as.formula(paste(
+        response_name,
+        paste(factor_names[1], factor_names[2], sep = " * "),
+        sep = " ~ "
+      )),
+      data = data2test,
+      lambda = seq(0, 1.0, 0.01))
+      print(range(lambdas$x[lambdas$y > max(lambdas$y) - qchisq(0.95, 1) /
+                              2]))
+      print(l.max <- lambdas$x[which.max(lambdas$y)])
+      if (l.max == 0)
+        l.max <- 1
+      data2test$Estimate.box <-
+        (data2test$Estimate ^ l.max - 1) / l.max
+      mod_lm <-
+        aov(as.formula(paste(
+          "Estimate.box",
+          paste(factor_names[1], factor_names[2], sep = " * "),
+          sep = " ~ "
+        )), data2test)
+    }
+    
+    if (exists("mod_lm")) {
+      print(mod_lm)
+      mod_df <- fortify(mod_lm)
+      factor.combinations <-
+        as.numeric(factor(paste(mod_df[, factor_names[1]], mod_df[, factor_names[2]]),
+                          levels = unique(as.character(
+                            paste(mod_df[, factor_names[1]], mod_df[, factor_names[2]])
+                          )))) # needed for "residuals vs leverage
+      mod_df <-
+        cbind(mod_df,
+              rows = 1:nrow(mod_df),
+              factors = factor.combinations)
+      PlotLmResid(mod_df)
+      if ((data2test %>% group_by(!!sym(factor_names[1]),!! sym(factor_names[2])) %>% dplyr::count() %>% pull(n) %>% n_distinct() == 1)) {
+        print("Equal group sizes - showing SS type I")
+        print(summary(mod_lm)) # display Type I ANOVA table
+        } else {
+          print("Unequal group sizes - showing SS type III")
+          options(contrasts = c("contr.sum", "contr.poly"))
+          print(Anova(mod_lm, type = "III")) # type III SS
+          }
+      print(model.tables(mod_lm, "means"), digits = 3) # Show the means
+      return(mod_lm)
+    }
+}
+```
+
+[roey.angel@bc.cas.cz](mailto: roey.angel@bc.cas.cz)  
+
+## TBI stabilisation factor (S) and decomposition rate (k) comparison according to Keuskamp et al. [-@keuskamp_tea_2013]
+
+```{r load data, cache=T}
+read.delim("TBI.csv", sep = "\t") %>% 
+  mutate(across(c("Soil",
+                  "Season"), 
+                ~factor(.))) %>% 
+  mutate(across("Season", ~fct_relevel(., "Winter", "Spring", "Summer", "Autumn"))) %>% 
+  unite("Soil_Season", Soil:Season, remove = FALSE) ->  
+  TBI 
+```
+
+### Test the differences in the stabilisation factor (S)
+```{r test diffs in S, cache=T}
+(mod_S <- TestAlphaV3(data2test = TBI,
+                        response_name = "S",
+                        factor_names = c("Soil", "Season"),
+                        boxcox.trans = FALSE))
+
+
+
+# Post-hoc test
+marginal <- emmeans(mod_S,
+                   ~ Soil : Season)
+summary(marginal)
+contrast(marginal, 
+         method = "pairwise", 
+         adjust = "tukey")
+(S_pairwise <- cld(marginal,
+                      alpha = 0.05,
+                      Letters = letters,
+                      adjust = "tukey")) # works with lm but not with two-factor ART
+(mod_S %>% 
+  anova() %>% 
+  mutate(`Part Eta Sq`=`Sum Sq`/sum(`Sum Sq`) ) ->
+  mod_S_ANOVA)
+# pwpp(marginal) # Pairwise P-value plot. Fails for unbalanced design
+emmip(mod_S, Soil ~ Season)
+
+
+```
+
+### Test the differences in the decomposition rate (k)
+```{r test diffs in k, cache=T}
+(mod_k <- TestAlphaV3(data2test = TBI,
+                        response_name = "k",
+                        factor_names = c("Soil", "Season"),
+                        boxcox.trans = FALSE))
+
+# Post-hoc test
+marginal <- emmeans(mod_k,
+                   ~ Soil : Season)
+summary(marginal)
+contrast(marginal, 
+         method = "pairwise", 
+         adjust = "tukey")
+(k_pairwise <- cld(marginal,
+                      alpha = 0.05,
+                      Letters = letters,
+                      adjust = "tukey")) # works with lm but not with two-factor ART
+(mod_k %>% 
+  anova() %>% 
+  mutate(`Part Eta Sq`=`Sum Sq`/sum(`Sum Sq`) ) ->
+  mod_k_ANOVA)
+# pwpp(marginal) # Pairwise P-value plot. Fails for unbalanced design
+emmip(mod_k, Soil ~ Season)
+```
+
+### Plot TBI factors
+```{r plot alpha, cache=T, fig.width=10, fig.height=6, fig.cap=""}
+TBI %>% 
+  pivot_longer(cols = c("S", "k"), 
+               names_to = c("Factor"), 
+               values_to = c("Value")) %>% 
+  mutate(across(Factor, ~dplyr::recode(., S = "Stabilisation factor (S)", k = "Decomposition rate (k)"))) ->
+  TBI2plot
+  
+p_alpha <- ggplot() +
+  geom_violin(data = TBI2plot,
+             aes(
+               x = Soil,
+               y = Value,
+               # ymin = lerr,
+               # ymax = herr
+             ), colour = "grey",
+              fill = "grey",
+              alpha = 1 / 3) +
+  geom_jitter(data = TBI2plot,
+               aes(x = Soil,
+               y = Value,
+               # ymin = lerr,
+               # ymax = herr,
+               colour = Soil), size = 3, width = 0.2, alpha = 2/3) +
+  # scale_colour_manual(values = Gradient.colours[c(5, 6, 11)], name = "") +
+  scale_colour_locuszoom(name = "") +
+  scale_fill_locuszoom(name = "") +
+  theme(legend.position = "none") +
+  # geom_errorbar(alpha = 1 / 2, width = 0.3) +
+  xlab("") +
+  ylab("") +
+  theme(axis.text.x = element_text(
+    angle = 45,
+    vjust = 0.9,
+    hjust = 1
+  )) +
+  facet_grid(Factor ~ Season, scale = "free") +
+  theme(strip.text = element_text(size = f_size - 4)) +
+  background_grid(major = "y",
+                  minor = "none",
+                  size.major = 0.8) 
+
+bind_rows(`Stabilisation factor (S)` = S_pairwise, 
+          `Decomposition rate (k)` = k_pairwise, 
+          .id = "Factor") %>% 
+  bind_cols(., y = rep(c(0.58, 0.048), each = 12)) %>% 
+  mutate(across(Soil, ~fct_inorder(.x))) ->
+  dat_text
+
+p_alpha <- p_alpha + geom_text(
+  data = dat_text,
+  mapping = aes(x = Soil, y = y, label = .group),
+  nudge_x = 0,
+  nudge_y = 0
+)
+print(p_alpha)
+```
+
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
+
+## References
+

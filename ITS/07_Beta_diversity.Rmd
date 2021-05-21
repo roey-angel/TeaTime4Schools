@@ -1,0 +1,1344 @@
+---
+title: "TeaTime4schools: Joint analysis - fungi"
+subtitle: "07 Beta diversity analysis"
+author: "Roey Angel"
+date: "`r Sys.Date()`"
+bibliography: references.bib
+link-citations: yes
+csl: fems-microbiology-ecology.csl
+always_allow_html: true
+output:
+  rmarkdown::github_document:
+    toc: true
+    toc_depth: 5
+    number_sections: false
+    dev: "png"
+    df_print: "kable"
+    keep_html: true
+---
+
+```{r libraries, include=F}
+# Load libraries
+#.libPaths(c('~/R/library', .libPaths())) # Uncomment if you have no write access to R path
+library(ragg) # Graphic Devices Based on AGG, CRAN v1.1.2 
+library(knitr) # A General-Purpose Package for Dynamic Report Generation in R
+library(kableExtra) # Construct Complex Table with 'kable' and Pipe Syntax
+library(extrafont) # for extra figure fonts
+library(rmarkdown) # Dynamic Documents for R
+library(tidyverse) # for dplyr forcats ggplot2 readr tibble
+library(broom) # Convert Statistical Analysis Objects into Tidy Data Frames (should be part of tidyverse)
+library(gridExtra) # Miscellaneous Functions for "Grid" Graphics
+library(cowplot) # wrappers for ggplot
+library(ggrepel) # Repulsive Text and Label Geoms for 'ggplot2'
+library(magrittr) # pipes
+library(scales) # Generic plot scaling methods
+library(svglite) # for svg files
+library(vegan) # community ecology methods
+library(doParallel) # parallel backend for the foreach/%dopar% function
+library(vsn) # Variance stabilization and calibration for microarray
+library(ade4) # Analysis of Ecological Data
+library(ggthemes) #Extra Themes, Scales and Geoms for 'ggplot2'
+library(ggsci) #Scientific Journal and Sci-Fi Themed Color 
+library(phyloseq) # Handling and analysis of high-throughput phylogenetic sequence data
+library(ALDEx2) # Analysis Of Differential Abundance Taking Sample Variation Into Account
+library(ggpomological) # Pomological plot themes for ggplot2
+```
+
+```{r style settings, include=F}
+options(width = 90, knitr.table.format = "html") 
+opts_chunk$set(
+  warning = FALSE,
+  message = FALSE,
+  cache = TRUE,
+  dev = "ragg_png",
+  fig.ext = "png",
+  # dev = c("svglite", "png"),
+  # dev.args = list(svglite = list(bg = 'white', fix_text_size = FALSE), png = list(bg = 'white')),
+  dpi = 300,
+#  fig.width = 12,
+#  fig.height = 8,
+  cache.path = "07_Beta_cache/",
+  fig.path = "07_Beta_figures/"
+)
+f_name <- "DejaVu Sans" #sub("\\s//", "", f_name)
+f_size <- 12
+font_import(pattern = "DejaVuSans\\.", prompt = FALSE)
+loadfonts() # registers fonts
+theme_set(theme_bw(base_size = f_size, base_family = f_name))
+```
+
+```{r functions, include=F}
+PlotLibDist <- function(physeq) {
+  ggplot(get_variable(physeq),
+         aes(x = Replicate, y = Lib.size, fill = Sample.type)) +
+    geom_bar(stat = "identity",
+             position = "dodge",
+             color = "black") +
+    scale_y_log10(
+      breaks = trans_breaks("log10", function(x)
+        10 ^ x),
+      labels = trans_format("log10", math_format(10 ^ .x))
+    ) +
+    background_grid(major = "xy", minor = "none") +
+    # scale_fill_locuszoom() +
+    facet_grid(Field ~ .)
+}
+
+PlotReadHist <- function(OTUmat, b.width = 10) {
+  OTUmat %>%
+    t() %>%
+    as_tibble() %>%
+    gather(key = sample, value = abundance) %>%
+    ggplot(aes(abundance)) +
+    # geom_histogram(binwidth = 1000) +
+    geom_freqpoly(binwidth = b.width) +
+    scale_y_log10()
+}
+
+PairwiseAdonis <- function(x, factors, sim.function = "vegdist", sim.method = "horn", 
+                           p.adjust.m = "BH", reduce = NULL) 
+{
+  # Taken from: https://github.com/pmartinezarbizu/pairwiseAdonis
+  co <- combn(unique(as.character(factors)), 2)
+  pairs <- c()
+  total.DF <- c()
+  F.Model <- c()
+  R2 <- c()
+  p.value <- c()
+  for (elem in 1:ncol(co)) {
+    
+    if (sim.function == "daisy") {
+      x1 = daisy(x[factors %in% c(co[1, elem], co[2, elem]), ],
+                 metric = sim.method)
+    } else {
+      x1 = vegdist(x[factors %in% c(co[1, elem], co[2, elem]), ],
+                   method = sim.method)
+    }
+    ad <- adonis2(x1 ~ fct, 
+                  data = data.frame(fct = factors[factors %in% c(co[1, elem], 
+                                              co[2, elem])]),
+                  permutations = 999)
+    # ad <- adonis(x1 ~ factors[factors %in% c(co[1, elem], 
+    #     co[2, elem])], permutations = 999) # 
+    # ad1 <- adonis(x[factors %in% c(co[1, elem], co[2, elem]), ] ~ fct,
+    #               data = data.frame(fct = factors[factors %in% c(co[1, elem],
+    #                                                         co[2, elem])]),
+    #               method="horn",
+    #               permutations = 999)
+    
+    pairs <- c(pairs, paste(co[1, elem], "vs", co[2, elem]))
+    # total.DF <- c(total.DF, ad$aov.tab["Total", 1]) # fails in vegan 2.5-7
+    total.DF <- c(total.DF, ad["Total", "Df"])
+    F.Model <- c(F.Model, ad[1, "F"])
+    R2 <- c(R2, ad[1, "R2"])
+    p.value <- c(p.value, ad[1, "Pr(>F)"])
+  }
+  p.adjusted <- p.adjust(p.value, method = p.adjust.m)
+  sig = c(rep("", length(p.adjusted)))
+  sig[p.adjusted <= 0.05] <- "."
+  sig[p.adjusted <= 0.01] <- "*"
+  sig[p.adjusted <= 0.001] <- "**"
+  sig[p.adjusted <= 1e-04] <- "***"
+  pairw.res <- data.frame(pairs, total.DF, F.Model, R2, p.value, 
+                          p.adjusted, sig)
+  if (!is.null(reduce)) {
+    pairw.res <- subset(pairw.res, grepl(reduce, pairs))
+    pairw.res$p.adjusted <- p.adjust(pairw.res$p.value, method = p.adjust.m)
+    sig = c(rep("", length(pairw.res$p.adjusted)))
+    sig[pairw.res$p.adjusted <= 0.05] <- "."
+    sig[pairw.res$p.adjusted <= 0.01] <- "*"
+    sig[pairw.res$p.adjusted <= 0.001] <- "**"
+    sig[pairw.res$p.adjusted <= 1e-04] <- "***"
+    pairw.res <- data.frame(pairw.res[, 1:5], sig)
+  }
+  class(pairw.res) <- c("pwadonis", "data.frame")
+  return(pairw.res)
+}
+
+STAMPR <-
+  function(physeq_obj,
+           rank = "Phylum",
+           vars2test = c("Spill", "Treatment"),
+           sig_pairs,
+           threshold = 0.005,
+           outputfile = "STAMPR_output") {
+    # run a STAMP-like analysis: compare relative abundance differences using two-way analysis, then run a post-hoc test and correct for multiple comparisons
+    # The one-way analysis is done using the Kruskal-Wallis Rank Sum Test and the two way analysis is run using the Scheirer Ray Hare test. Both are non-parametric versions of ANOVA on a ranked datasets.
+    # The post-hoc test is a Mann Whitney test on each significant pair.
+    # Effect sizes (eta^2) are taken from TOMCZAK and TOMCZAK 2014 Trends in Sport Sciences
+    # TODO: potentially add effect size calculation to the post-hoc pairs test (MW-U) using eta^2 = Z^2/n
+    
+    if (length(vars2test) != 1 &
+        length(vars2test) != 2)
+      {stop('This function only suppurts 1 or two independent variables')}
+    
+    test_expression <-
+      as.formula(paste("Abundance", paste(vars2test, collapse = " + "), sep = " ~ "))
+    
+    physeq_glom <- tax_glom(physeq_obj,
+                            rank,
+                            NArm = TRUE)
+    physeq_glom_rel <-
+      transform_sample_counts(physeq_glom, function(x)
+        x / sum(x))
+    
+    # FindTest only abundant taxa: group dataframe by rank, calculate median rel. abundance and keep only taxa above threshold
+    physeq_glom_rel %>%
+      psmelt %>%
+      group_by(!!sym(rank)) %>%
+      summarise(median = median(Abundance)) %>%
+      filter(median >= threshold) %>%
+      pull(1) %>%
+      as.character() ->
+      Taxa2test
+    
+    physeq_glom_rel_abund <-
+      prune_taxa(tax_table(physeq_glom_rel)[, rank] %in% Taxa2test, physeq_glom_rel)
+    
+    
+    if (length(vars2test) == 1) {
+      taxa_test_results <-
+        bind_cols(Taxa = as(tax_table(physeq_glom_rel_abund)[, rank], "vector"),
+                  as.data.frame(matrix(
+                    NA,
+                    nrow = ntaxa(physeq_glom_rel_abund),
+                    ncol = length(sig_pairs) + 2 # sig_pairs is taken from pairwise adonis. In addition the factors are tested alone.
+                  )))
+      colnames(taxa_test_results) <-
+        c(rank,
+          paste(vars2test, "- P"),
+          paste(vars2test, "- EtaSq"),
+          sig_pairs)
+      
+      taxa_test_stats <-
+        bind_cols(Taxa = as(tax_table(physeq_glom_rel_abund)[, rank], "vector"),
+                  as.data.frame(matrix(
+                    NA,
+                    nrow = ntaxa(physeq_glom_rel_abund),
+                    ncol = (length(sig_pairs) * 5) # sig_pairs is taken from pairwise adonis
+                  )))
+      colnames(taxa_test_stats) <-
+        c(rank, c(rbind(
+          t(str_split_fixed(sig_pairs, " vs ", n = 2)), matrix(rep(
+            c("Estimate diff.", "low CI", "high CI"), length(sig_pairs)
+          ), ncol = length(sig_pairs))
+        ))) # this is ugly but it works well, basically c() flattens a matrix
+      
+      for (phy_id in seq(ntaxa(physeq_glom_rel_abund))) {
+        data2test <-
+          bind_cols(Abundance = as.numeric(otu_table(physeq_glom_rel_abund)[, phy_id] * 100),
+                get_variable(physeq_glom_rel_abund))
+        # kruskal.test(Abundance ~ Climate.Source, data = data2test)
+        print(tax_table(physeq_glom_rel_abund)[phy_id, rank])
+        
+        print(mod_summary <-
+                kruskal.test(Abundance ~ Sample.type, data = data2test))
+        taxa_test_results[phy_id, c(2)] <-
+          mod_summary$p.value[1] # p values
+        taxa_test_results[phy_id, c(3)] <-
+          (mod_summary$statistic - mod_summary$parameter + 2) / (nrow(data2test) - mod_summary$parameter + 1) # EtaSq (effect size)
+        
+        for (pair in seq(length(sig_pairs))) {
+          pairs2test <- unlist(str_split(sig_pairs[pair], " vs "))
+          possibleError <- tryCatch(
+            wilcox_mod <-
+              wilcox.test(
+                as.formula(paste("Abundance", vars2test, sep = " ~ ")),
+                data = data2test,
+                subset = do.call("%in%", list(get(vars2test), pairs2test)),
+                conf.int = TRUE,
+                exact = FALSE
+              ),
+            error = function(e)
+              e
+          ) # AKA Mann Whitney
+          if (inherits(possibleError, 'error')) {
+            print(possibleError)
+            taxa_test_results[phy_id, pair + 3] <- NA
+          } else {
+            print(wilcox_mod)
+            taxa_test_results[phy_id, pair + 3] <-
+              wilcox_mod$p.value
+            taxa_test_stats[phy_id, (pair - 1) * 5 + 2] <-
+              mean(data2test[unlist(data2test[vars2test]) %in% pairs2test[1],]$Abundance)
+            taxa_test_stats[phy_id, (pair - 1) * 5 + 3] <-
+              mean(data2test[unlist(data2test[vars2test]) %in% pairs2test[2],]$Abundance)
+            taxa_test_stats[phy_id, (pair - 1) * 5 + 4] <-
+              wilcox_mod$estimate
+            taxa_test_stats[phy_id, (pair - 1) * 5 + c(5, 6)] <-
+              wilcox_mod$conf.int[c(1, 2)]
+          }
+        }
+      }
+      
+    } else {
+      factors_combination <- paste(vars2test, collapse = ".")
+      get_variable(physeq_obj)[, factors_combination] <-
+        paste(get_variable(Ps_obj_filt, vars2test[1]),
+              get_variable(Ps_obj_filt, vars2test[2]))
+      taxa_test_results <-
+        bind_cols(Taxa = tax_table(physeq_glom_rel_abund)[, rank],
+                  as.data.frame(matrix(
+                    NA,
+                    nrow = ntaxa(physeq_glom_rel_abund),
+                    ncol = length(sig_pairs) + 6 # sig_pairs is taken from pairwise adonis. In addition the factors are tested alone.
+                  )))
+      colnames(taxa_test_results) <-
+        c(
+          rank,
+          paste(vars2test[1], "- P"),
+          paste(vars2test[1], "- EtaSq"),
+          paste(vars2test[2], "- P"),
+          paste(vars2test[2], "- EtaSq"),
+          paste(paste(vars2test, collapse = " X "), "- P"),
+          paste(paste(vars2test, collapse = " X "), "- EtaSq"),
+          sig_pairs
+        )
+      
+      taxa_test_stats <-
+        bind_cols(Taxa = tax_table(physeq_glom_rel_abund)[, rank],
+                  as.data.frame(matrix(
+                    NA,
+                    nrow = ntaxa(physeq_glom_rel_abund),
+                    ncol = (length(sig_pairs) * 5) # sig_pairs is taken from pairwise adonis
+                  )))
+      colnames(taxa_test_stats) <-
+        c(rank, c(rbind(
+          t(str_split_fixed(sig_pairs, " vs ", n = 2)), matrix(rep(
+            c("Estimate diff.", "low CI", "high CI"), length(sig_pairs)
+          ), ncol = length(sig_pairs))
+        ))) # this is ugly but it works well, basically c() flattens a matrix
+      
+      for (phy_id in seq(ntaxa(physeq_glom_rel_abund))) {
+        data2test <-
+          cbind(Abundance = as.numeric(otu_table(physeq_glom_rel_abund)[, phy_id] * 100),
+                get_variable(physeq_glom_rel_abund))
+        # kruskal.test(Abundance ~ Climate.Source, data = data2test)
+        print(tax_table(physeq_glom_rel_abund)[phy_id, rank])
+        
+        print(mod_summary <-
+                scheirerRayHare(Abundance ~ Sample.type, data = data2test))
+        taxa_test_results[phy_id, c(2, 4, 6)] <-
+          mod_summary$p.value[1:3] # p values
+        taxa_test_results[phy_id, c(3, 5, 7)] <-
+          mod_summary$`Sum Sq`[1:3] / sum(mod_summary$`Sum Sq`) # EtaSq (effect size - like ANOVA)
+        
+        for (pair in seq(length(sig_pairs))) {
+          pairs2test <- unlist(str_split(sig_pairs[pair], " vs "))
+          possibleError <- tryCatch(
+            wilcox_mod <-
+              wilcox.test(
+                as.formula(paste(
+                  "Abundance", factors_combination, sep = " ~ "
+                )),
+                data = data2test,
+                subset = do.call("%in%", list(
+                  get(factors_combination), pairs2test
+                )),
+                conf.int = TRUE,
+                exact = FALSE
+              ),
+            error = function(e)
+              e
+          ) # AKA Mann Whitney
+          if (inherits(possibleError, 'error')) {
+            print(possibleError)
+            taxa_test_results[phy_id, pair + 7] <- NA
+          } else {
+            print(wilcox_mod)
+            taxa_test_results[phy_id, pair + 7] <-
+              wilcox_mod$p.value
+            taxa_test_stats[phy_id, (pair - 1) * 5 + 2] <-
+              mean(data2test[unlist(data2test[factors_combination]) %in% pairs2test[1],]$Abundance)
+            taxa_test_stats[phy_id, (pair - 1) * 5 + 3] <-
+              mean(data2test[unlist(data2test[factors_combination]) %in% pairs2test[2],]$Abundance)
+            taxa_test_stats[phy_id, (pair - 1) * 5 + 4] <-
+              wilcox_mod$estimate
+            taxa_test_stats[phy_id, (pair - 1) * 5 + c(5, 6)] <-
+              wilcox_mod$conf.int[c(1, 2)]
+          }
+        }
+      }
+    }
+    
+    # Correct for FDR for each comparison pair
+    for (pair in seq(2, ncol(taxa_test_results))) {
+      # print(pair)
+      taxa_test_results[, pair] <-
+        p.adjust(taxa_test_results[, pair] , method = "BH") # Benjamini, Y., and Yekutieli, D. (2001). The control of the false discovery rate in multiple testing under dependency. Annals of Statistics 29, 1165–1188.
+      # qvalue(p = pull(taxa_test_results[, pair]))
+    }
+    
+    write.csv(taxa_test_results, file = paste0(outputfile, "_", rank, "_Pvals.csv"))
+    write.csv(taxa_test_stats, file = paste0(outputfile, "_", rank, "_CI.csv"))
+    Taxa_tests <- list(taxa_test_results, taxa_test_stats)
+    return(Taxa_tests)
+  }
+
+plotSTAMPR <- function(STAMPR_output = Taxa_tests_phylum1, pair = "City - Slope", tax_level = "Phylum", f_size = 14){
+  require(ggthemes)
+  require(ggpomological)
+  if (!is.list(STAMPR_output) | length(STAMPR_output) != 2) {print("The function accepts only lists with two elements")}
+  
+  pair_number <- which(colnames(STAMPR_output[[1]]) == pair) - 3
+  pvals_col <- pair_number + 3
+  stats_col <- seq(from = 2, to = (ncol(STAMPR_output[[1]]) - 3) * 5, by = 5)[pair_number - 4]
+  
+  bind_cols(STAMPR_output[[1]][1], 
+            STAMPR_output[[1]][pair] ,
+            STAMPR_output[[2]][stats_col:(stats_col + 4)]
+  ) %>% 
+    mutate(Higher = if_else(.[3] > .[4], colnames(.)[3], colnames(.)[4])) %>% 
+    gather("Factor", `Mean proportion (%)`, 3:4) %>% 
+    mutate_at(c(tax_level, "Higher", "Factor"), ~fct_rev(.)) -> # fct_rev because coord_flip() reverses the order
+    STAMPR_df
+    tibble(
+      min = seq(
+        from = 0.5,
+        to = max(as.numeric(pull(STAMPR_df, tax_level))),
+        by = 1
+      ),
+      max = seq(
+        from = 1.5,
+        to = max(as.numeric(pull(STAMPR_df, tax_level))) + 0.5,
+        by = 1
+      )) %>% 
+        add_column(Shade = rep(c(0, 1), length.out = nrow(.))) %>% 
+      mutate_at("Shade", ~as.factor(.)) ->
+    # %>% slice(rep(1:n(), each = 2))
+    #   mutate(col = ifelse(allyrs == TRUE, 1, 0))
+    #   
+      # mutate_at("min", ~case_when(col == 1 ~ . - 0.3, 
+                                       # TRUE ~ .)) %>% 
+      # mutate_at("max", ~case_when(col == 1 ~ . - 0.3, 
+                                       # TRUE ~ .)) -> 
+      shading
+  # ggthemr("grape")
+  p1 <- ggplot() +
+  geom_rect(data = shading,
+            aes(xmin = min, xmax = max, ymin = -Inf, ymax = Inf,
+                fill = Shade, alpha = 0.1), fill = rep(c("white", "#E9EDED"), length.out = nrow(shading)), show.legend = F) + 
+  geom_col(data = STAMPR_df, 
+           mapping = aes(!! sym(tax_level), y = `Mean proportion (%)`, fill = Factor), 
+           width = 0.8, 
+           position = position_dodge(),
+           alpha = 2/3) + 
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_x_discrete(expand = c(0, 0)) +
+    coord_flip() + 
+    geom_rangeframe(data = STAMPR_df, aes(!! sym(tax_level), y = `Mean proportion (%)`), sides = "b") +
+    # scale_fill_manual(values = Gradient.colours[c(6, 5)])  +
+    scale_fill_pomological() +
+    theme_tufte(base_size = f_size, base_family = "sans") +
+    theme(legend.position = "top",
+          legend.justification = 'left',
+          legend.title = element_blank()) +
+    guides(fill = guide_legend(reverse = TRUE))
+          # panel.grid.major.x = element_line(colour = "white"),
+          # panel.ontop = TRUE)
+  p2 <- ggplot() +
+    geom_rect(
+      data = shading,
+      aes(
+        xmin = min,
+        xmax = max,
+        ymin = -Inf,
+        ymax = Inf,
+        fill = Shade,
+        alpha = 0.1
+      ),
+      fill = rep(c("white", "#E9EDED"), length.out = nrow(shading)),
+      show.legend = F
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "slategray", size = 1, alpha = 2/3) + 
+    geom_errorbar(data = STAMPR_df,
+                  aes(
+                    !! sym(tax_level),
+                    ymin = `low CI`,
+                    ymax = `high CI`,
+                    colour = Higher),
+                  width = 0.3,
+                  alpha = 2/3
+    ) +
+    geom_point(data = STAMPR_df,
+               aes(!! sym(tax_level), 
+                   y = `Estimate diff.`, 
+                   colour = Higher),
+               size = 4,
+               alpha = 2/3) +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_x_discrete(
+      expand = c(0, 0),
+      breaks = STAMPR_df[[tax_level]],
+      labels = formatC(STAMPR_df[, 2], format = "e", digits = 2),
+      position = "top"
+    ) +
+    geom_rangeframe(data = STAMPR_df, aes(!! sym(tax_level), y = seq(
+      min(`low CI`),
+      max(`high CI`),
+      length.out = nrow(STAMPR_df)
+    )), sides = "b") +
+    scale_color_pomological() + 
+    theme_tufte(base_size = f_size, base_family = "sans") +
+    theme(legend.position = "none", 
+          plot.title = element_text(margin = margin(10, 0, 18, 0), hjust = 0.5),
+          axis.title.y = element_text(margin = margin(t = 0, r = 0, b = 20, l = 0), angle = 180)) + # BUG: no response
+    labs(title = "95% confidence intervals", 
+         y = "Difference in mean abundance (%)",
+         x = "p-value (corrected)") +
+    coord_flip()
+  # p1 + p2 + plot_layout(widths = c(1, 2)) # doesn't look as good
+  plot_grid(p1, p2, rel_widths = c(2, 3)) + theme(plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), "cm"))
+  # ggthemr_reset()
+}
+
+DropRareSpecies <- function(Ps_obj = Ps_obj_filt_median, prevalence = 0.1) {
+  # calculate sequence prevalence   
+  prevdf <- apply( 
+    X = otu_table(Ps_obj),
+    MARGIN = ifelse(taxa_are_rows(Ps_obj), yes = 1, no = 2),
+    FUN = function(x) {sum(x > 0)}
+    )
+  # Add taxonomy and total read counts to this data.frame
+  prevdf <- data.frame(
+    Prevalence = prevdf,
+    TotalAbundance = taxa_sums(Ps_obj),
+    tax_table(Ps_obj)
+  )
+  
+  # Define prevalence threshold as a fraction of the total samples
+  prevalenceThreshold <- prevalence * nsamples(Ps_obj)
+  prevalenceThreshold
+  
+  # Execute prevalence filter, using `prune_taxa()` function
+  prevdf_phylum_filt <-
+    subset(prevdf,
+           Phylum %in% get_taxa_unique(Ps_obj, "Phylum"))
+  keepTaxa <-
+    row.names(prevdf_phylum_filt)[(prevdf_phylum_filt$Prevalence >= prevalenceThreshold)]
+  Ps_obj_small <- prune_taxa(keepTaxa, Ps_obj)
+  sample_data(Ps_obj_small)$Lib.size <-
+    rowSums(otu_table(Ps_obj_small))
+  print(Ps_obj)
+  print(Ps_obj_small)
+  return(Ps_obj_small)
+}
+
+
+CalcALDEx <- function(physeq_obj = Ps_obj_filt_subset, vars2test = "Spill.Treatment", rare_phyla = Rare_phyla, sig_level = 0.05, LFC = 0.322, ...) {
+  physeq_obj <- filter_taxa(physeq_obj, function(x) sum(x) > 0, TRUE)
+  # physeq_obj <- prune_taxa(sig_taxa, physeq_obj) # remove taxa not significant under the full model
+  data2test <- t(otu_table(physeq_obj))
+  comparison <- as.character(get_variable(physeq_obj, vars2test))
+  ALDEx <- aldex.clr(
+    data2test,
+    comparison,
+    mc.samples = 128,
+    denom = "iqlr", # iqlr for slight assymetry in composition
+    verbose = TRUE,
+    useMC = TRUE
+  ) 
+  ALDEx_tt <- aldex.ttest(ALDEx, comparison, paired.test = FALSE) # for two conditions
+  ALDEx_effect <- aldex.effect(
+    ALDEx,
+    comparison,
+    include.sample.summary = TRUE,
+    verbose = TRUE,
+    useMC = TRUE
+  ) # estimate effect sizes
+  ALDEx2plot <- PrepAlDExData(ALDEx_tt, ALDEx_effect, physeq_obj, sig_level, LFC, Taxa_rank, rare_phyla)
+  return(ALDEx2plot)
+}
+
+PrepAlDExData <- function(ALDEx_tt, ALDEx_effect, physeq_obj = Ps_obj_filt_subset, sig_level, LFC, Taxa_rank, rare_phyla, ...) {
+  ALDEx2plot <- data.frame(ALDEx_tt, ALDEx_effect) # merge results
+  # group dataframe by OTU, calculate median rel. abundance
+  physeq_obj %>%
+    transform_sample_counts(., function(x) x / sum(x) * 100) %>% 
+    psmelt() %>%
+    group_by(OTU) %>%
+    # filter(OTU %in% sig_taxa) %>%
+    summarise(baseMean = mean(Abundance)) ->
+    baseMean
+  
+  ALDEx2plot$OTU <- rownames(ALDEx2plot)
+  ALDEx2plot %<>% left_join(., baseMean, by = "OTU") # add mean abundance to results table
+  ALDEx2plot %<>% cbind(., tax_table(physeq_obj)[taxa_names(physeq_obj) %in% ALDEx2plot$OTU, ], stringsAsFactors = FALSE) # add taxonomy
+  # change their name to "Rare"
+  
+  ALDEx2plot[ALDEx2plot$Order %in% rare_phyla, ]$Order <- 'Rare' # rare_phyla is calcuted for the taxa box plots
+  ALDEx2plot$Significance <- factor("Fail", levels = c("Fail", "Pass")) # define significance factor
+  ALDEx2plot$Significance[ALDEx2plot$wi.eBH < sig_level &
+                            !is.na(ALDEx2plot$wi.eBH) &
+                            abs(ALDEx2plot$effect) > LFC] <- "Pass"
+  # ALDEx2plot$Significance <- as.factor(sapply(ALDEx2plot$wi.eBH, function(x) if (is.na(x) | x > 0.05) {x <- "Fail"} else {x <- "Pass"}))
+  # Rank by taxa abundance
+  ALDEx2plot$Order %<>%
+    factor(., levels = Taxa_rank$Order) %>%  # Taxa_rank is calcuted for the taxa box plots
+    fct_relevel(., "Rare", after = Inf)
+  return(ALDEx2plot)
+}
+
+GGPlotALDExTax <- function(ALDEx2plot, OTU_labels = FALSE, Taxa = "Order", Y_val = "effect", sig_level = 0.1) {
+  pos <- position_jitter(width = 0.3, seed = 1)
+  p <-
+    ggplot(ALDEx2plot) +
+    geom_point(aes_string(
+             x = Taxa,
+             y = Y_val,
+             colour = "Significance",
+             size = "baseMean"),
+             position = pos, 
+             alpha = 2 / 3, 
+             stroke = 0) +
+    xlab("") +
+    ylab(expression(paste("Effect size (lo", g[2], " fold change)"))) +
+    # ylab("Fold change") +
+    labs(colour = paste("Significance at \n p <", sig_level), size = "Mean count (%)") +
+    theme_grey(base_size = 18,  base_family = "sans") +
+    theme(axis.text.x = element_text(angle = 45.0, vjust = 1, hjust = 1)) +
+    guides(colour = guide_legend(override.aes = list(size = 5))) +
+    scale_colour_manual(values = c(ggpomological:::pomological_base[[7]], ggpomological:::pomological_palette[[1]])) +
+    scale_size_continuous(range = c(1, 5), breaks = c(1, 2.5, 5, 10))
+  
+  if (OTU_labels) {
+    p <- p + geom_label_repel(
+      aes_string(x = Taxa, y = Y_val),
+      size = 6,
+      label = sub("Seq_([0-9]+)", "\\1", ALDEx2plot[ALDEx2plot$Significance == "Pass", "OTU"]),
+      position = pos,
+      data = ALDEx2plot[ALDEx2plot$Significance == "Pass", ],
+      # nudge_x = 0.4,
+      colour = "#4a4a4a",
+      label.size = NA, 
+      alpha = 0.75, 
+      # fontface = 'bold',
+      box.padding = 0.80,
+      point.padding = 0.5
+      
+    )
+  }
+  return(p)
+}
+
+GGPlotOTU <- function(physeq_obj = Ps_obj_filt_subset_New_Oil_Control, vars2test = "Spill.Treatment", OTU_name = "Seq_8"){
+  # adapted from https://link.springer.com/protocol/10.1007%2F978-1-4939-8728-3_10
+  require("phyloseq")
+  require("ggplot2")
+  require("ggpomological")
+  # Get Proportion transform
+  otuRA <- transform_sample_counts(physeq_obj, function(x) x/sum(x))
+  gtab <- tibble(
+    Count = get_sample(physeq_obj, i = OTU_name),
+    Proportion = get_sample(otuRA, i = OTU_name),
+    SAMPLE_ID = unlist(get_variable(physeq_obj, "Joint.sample.name")),
+    TREATMENT = get_variable(physeq_obj, vars2test)
+  )
+  suppressWarnings({
+    mgtab <- gather(
+      gtab,
+      "Count", "Proportion",
+      key = "Type",
+      value = "Abundance",
+    )
+  })
+  # detect if pairs are both zero
+  mgtab %<>% group_by(SAMPLE_ID) %>% mutate(., BothZero := all(Abundance == 0))
+  
+  # Create a dummy min-value for display
+  mgtab %<>% group_by(Type) %>% mutate(Zero = min(Abundance[(Abundance > 0.0)], na.rm = TRUE)/10)
+  mgtab %<>% group_by(SAMPLE_ID) %>% mutate(Abundance = replace(Abundance, Abundance == 0.0, Zero[Abundance == 0.0]))
+
+  
+  pointSize <- 3
+  p <- ggplot(data = mgtab,
+             mapping = aes(
+               x = TREATMENT, 
+               y = Abundance,
+               color = TREATMENT,
+               shape = TREATMENT)) + 
+    facet_wrap(~Type, scales = "free_y") +
+    # Not both zero
+    geom_point(
+      data = filter(mgtab, BothZero == FALSE),
+      size = pointSize, 
+      alpha = 0.8) +
+    # Both Zero
+    geom_point(
+      data = filter(mgtab, BothZero == TRUE),
+      size = pointSize, 
+      alpha = 0.8,
+      position = position_jitter(width = 0.2, height = 0)) + 
+    geom_path(
+      data = filter(mgtab, BothZero == FALSE),
+      mapping = aes(group = SAMPLE_ID), 
+      color = "darkgray", 
+      size = 0.25,
+      position = position_jitter(width = 0, height = 0.001)) + 
+    geom_text(mapping = aes(label = SAMPLE_ID),
+              data = filter(mgtab, TREATMENT == levels(gtab$TREATMENT)[1] & Abundance > Zero),
+              color = "black",
+              size = 2,
+              nudge_x = -0.15) +
+    scale_colour_manual(values = c(ggpomological:::pomological_base[[7]], ggpomological:::pomological_palette[[1]])) +
+    # scale_y_sqrt() +
+    scale_y_log10() +
+    theme_bw() + 
+    theme(text = element_text(size = f_size),
+          legend.position = "none") +
+    scale_size_continuous(range = c(2, 5))
+    # ggtitle(paste("Abundance plot for OTU", OTU))
+  return(p)
+}
+
+GGPlotTopOTUs <- function(physeq_obj = Ps_obj_filt_subset_New_Oil_Control, ALDEx_obj = ALDEx2plot_New_Oil_Control, vars2test = "Spill.Treatment", tax_level = "Order", rank_by = "effect", Ntop = 12){
+  # adapted from https://link.springer.com/protocol/10.1007%2F978-1-4939-8728-3_10
+  require("phyloseq")
+  require("ggplot2")
+  require("ggpomological")
+  
+  # Rank OTUs according to rank_by
+  ALDEx_obj %>% 
+  filter(Significance == "Pass") %>% 
+  dplyr::select(OTU, !! sym(tax_level), baseMean, effect) %>%
+  arrange(desc(abs(!! sym(rank_by)))) -> OTU_rank
+    if (nrow(OTU_rank) < Ntop) Ntop <- nrow(OTU_rank)
+  OTU_rank %>% .[1:Ntop, ] %>% pull(OTU) -> OTU_names
+  
+  # Get rel. abund. transform
+  otuRA <- transform_sample_counts(physeq_obj, function(x) x/sum(x) * 100)
+
+  if (is.na(OTU_names[1]) | is.null(OTU_names[1])) {
+    message("No significant differentially abundant OTUs to display")
+  } else {
+    if (length(OTU_names) == 1) {
+      gtab <- tibble(
+        OTU =  as_factor(OTU_names),
+        # Count = gather(as_tibble(get_sample(physeq_obj, i = OTU_names)))$value,
+        Rel_abundance = gather(as_tibble(get_sample(otuRA, i = OTU_names)))$value,
+        SAMPLE_ID = as_factor(rep(unlist(get_variable(otuRA, "Joint.sample.name")), Ntop)),
+        TREATMENT = as_factor(rep(get_variable(otuRA, vars2test), Ntop)))
+      } else {
+      gtab <- tibble(
+        OTU =  as_factor(gather(as_tibble(get_sample(otuRA, i =
+                                                       OTU_names)))$key),
+        # Count = gather(as_tibble(get_sample(otuRA, i = OTU_names)))$value,
+        Rel_abundance = gather(as_tibble(get_sample(otuRA, i = OTU_names)))$value,
+        SAMPLE_ID = as_factor(rep(unlist(get_variable(otuRA, "Joint.sample.name")), Ntop)),
+        TREATMENT = as_factor(rep(get_variable(otuRA, vars2test), Ntop)))
+    }
+
+  gtab %<>% group_by(SAMPLE_ID, OTU) %>% mutate(., BothZero := all(Rel_abundance == 0))
+  
+  # Create a dummy min-value for display
+  gtab %<>% group_by(OTU) %>% mutate(Zero = min(Rel_abundance[(Rel_abundance > 0.0)], na.rm = TRUE)/10)
+  gtab %<>% group_by(SAMPLE_ID, OTU) %>% mutate(Rel_abundance = replace(Rel_abundance, Rel_abundance == 0.0, Zero[Rel_abundance == 0.0]))
+  gtab$SAMPLE_ID
+  
+  pointSize <- 3
+  p <- ggplot(data = gtab,
+             mapping = aes(
+               x = TREATMENT, 
+               y = Rel_abundance,
+               color = TREATMENT,
+               shape = TREATMENT)) + 
+    facet_wrap(~OTU, scales = "free_y") +
+    # Not both zero
+    geom_point(
+      data = filter(gtab, BothZero == FALSE),
+      size = pointSize, 
+      alpha = 0.8) +
+    # Both Zero
+    geom_point(
+      data = filter(gtab, BothZero == TRUE),
+      size = pointSize, 
+      alpha = 0.8,
+      position = position_jitter(width = 0.2, height = 0)) + 
+    geom_path(
+      data = filter(gtab, BothZero == FALSE),
+      mapping = aes(group = SAMPLE_ID),
+      color = "darkgray",
+      size = 0.25,
+      position = position_jitter(width = 0, height = 0.001)) +
+    geom_text(mapping = aes(label = SAMPLE_ID),
+              data = filter(gtab, TREATMENT == levels(gtab$TREATMENT)[1] & Rel_abundance > Zero),
+              color = "black",
+              size = 2,
+              nudge_x = -0.15) +
+    scale_colour_manual(values = c(ggpomological:::pomological_base[[7]], ggpomological:::pomological_palette[[1]])) +
+    # scale_y_sqrt() +
+    scale_y_log10() +
+    theme_bw() + 
+    theme(text = element_text(size = 14),
+          legend.position = "none") +
+    scale_size_continuous(range = c(2, 5)) +
+    ylab("Abundance (%)")
+    # ggtitle(paste("Abundance plot for OTU", OTU))
+  return(p)
+  }
+}
+
+```
+[roey.angel@bc.cas.cz](mailto: roey.angel@bc.cas.cz)  
+
+## Beta diversity analysis
+This analysis explores the alpha-diversity ditribution patters in the different samples, based on the DADA2-produced sequences. 
+### Setting general parameters:
+```{r general parameters}
+set.seed(1000)
+min_lib_size <- 5000
+data_path <- "./DADA2_pseudo/"
+Ps_file <- "TeaTime4Schools_ITS_filt3.RDS"
+Proj_name <- "TeaTime4Schools"
+```
+
+### Load phyloseq object
+This phyloseq object was created in [05_Taxonomical_analysis.html](05_Taxonomical_analysis.html). 
+The Ps_obj_filt object excludes contaminants or unknown but still includes taxa with low prevalence 
+```{r load phyloseq, cache=T}
+readRDS(file = paste0(data_path, Ps_file)) %>%
+  subset_samples(., Field != "Unburied") %>% # drop unburied samples
+  prune_samples(sample_sums(.) > min_lib_size, .) %>% # remove samples  < min_lib_size
+  filter_taxa(., function(x) sum(x) > 0, TRUE) -> # drop taxa with 0 abundance
+  Ps_obj_filt
+```
+
+```{r}
+qplot(rowSums(otu_table(Ps_obj_filt)), geom = "histogram") + 
+  xlab("Library size")
+qplot(log10(rowSums(otu_table(Ps_obj_filt)))) +
+  xlab("Logged library size")
+```
+
+### Standardize abundances to the median sequencing depth (and convert to proportion)
+```{r median, cache=T}
+adonis(
+  otu_table(Ps_obj_filt) ~ Lib.size,
+  data = get_variable(Ps_obj_filt),
+  method = "horn",
+  permutations = 9999
+)
+
+Ps_obj_filt %>%
+  otu_table(.) %>%
+  as(., "matrix") %>%
+  rowSums() %>% 
+  median() ->
+  total
+standf = function(x, t = total) round(t * (x / sum(x)))
+Ps_obj_filt_median <- transform_sample_counts(Ps_obj_filt, standf)  # Standardize abundances to median sequencing depth
+
+Ps_obj_filt_median_rel <- transform_sample_counts(Ps_obj_filt_median, function(x) x / sum(x)) # convert to relative abundance (just incase it's explicitly needed)
+
+sample_data(Ps_obj_filt_median)$Lib.size <- sample_sums(Ps_obj_filt_median)
+
+qplot(rowSums(otu_table(Ps_obj_filt_median)), geom = "histogram") + 
+  xlab("Library size")
+
+PlotLibDist(Ps_obj_filt_median)
+```
+
+```{r median diag plots, cache=T, fig.width=4, fig.asp=.8}
+PlotReadHist(as(otu_table(Ps_obj_filt_median), "matrix"))
+notAllZero <- (rowSums(t(otu_table(Ps_obj_filt_median))) > 0)
+meanSdPlot(as(log2(t(otu_table(Ps_obj_filt_median))[notAllZero, ] + 1), "matrix"))
+```
+
+### Variance partitioning models and ordinations
+#### Partitioning the data using discrete distance
+```{r var-part all ,cache=T}
+adonis(
+  otu_table(Ps_obj_filt_median) ~ Lib.size,
+  data = get_variable(Ps_obj_filt_median),
+  method = "horn",
+  permutations = 9999
+)
+adonis(
+  otu_table(Ps_obj_filt_median_rel) ~ Field + Sample.type * Season,
+  data = get_variable(Ps_obj_filt_median_rel),
+  method = "horn",
+  permutations = 999
+)
+```
+
+```{r pairwise var-part all ,cache=T}
+# sample_data(Ps_obj_filt_median)$Type.season <- paste(sample_data(Ps_obj_filt)$Sample.type, sample_data(Ps_obj_filt)$Season) # too many comparisons
+
+# Ps_obj_filt_median_s <- prune_taxa(names(sort(taxa_sums(Ps_obj_filt_median), TRUE)[1:100]), Ps_obj_filt_median) # for testing
+
+# Compare sample-type pairs
+mod_pairwise1 <- PairwiseAdonis(
+  x = otu_table(Ps_obj_filt_median),
+  factors = get_variable(Ps_obj_filt_median, "Sample.type"),
+  sim.function = "vegdist",
+  sim.method = "horn",
+  p.adjust.m = "BH"
+)
+print(mod_pairwise1)
+
+(sig_pairs1 <- as.character(mod_pairwise1$pairs[mod_pairwise1$p.adjusted < 0.05]))
+# (meaningful_sig_pairs1 <- c("Green tea vs Rooibos", "Green tea vs Soil", "Rooibos vs Soil"))
+
+# compare seasons
+mod_pairwise2 <- PairwiseAdonis(
+  otu_table(Ps_obj_filt_median),
+  sample_data(Ps_obj_filt_median)$Season,
+  sim.function = "vegdist",
+  sim.method = "horn",
+  p.adjust.m = "BH"
+)
+print(mod_pairwise2)
+
+(sig_pairs2 <- as.character(mod_pairwise2$pairs[mod_pairwise2$p.adjusted < 0.05]))
+# (meaningful_sig_pairs2 <- c("Green tea vs Rooibos", "Green tea vs Soil", "Rooibos vs Soil"))
+```
+
+##### Calculate ordinations
+```{r ordinate all, cache=T, fig.height=12, out.height="40%"}
+Ps_obj_ord1 <- ordinate(Ps_obj_filt_median, "CAP", "horn", formula = Ps_obj_filt_median ~  Field + Sample.type * Season)
+evals <- eigenvals(Ps_obj_ord1) # /sum(eigenvals(Ps_obj_ord)) * 100
+
+Ps_obj_filt_median %>% 
+  plot_ordination(., Ps_obj_ord1, type = "samples", shape = "Field", color = "Sample.type", justDF = TRUE) %>% 
+  mutate_at(., "Season", ~fct_relevel(., "Winter", "Spring", "Summer", "Autumn")) %>% 
+  mutate_at(., "Sample.type", ~fct_relevel(., "Soil", "Green tea", "Rooibos")) %>% 
+  dplyr::rename(., `Sample type` = Sample.type) ->
+  ord_df
+
+# p_ord.file <- "PCoA_bray"
+# svglite(paste0(p_ord.file, ".svg"),
+#         width = 10, height = 7.2)
+
+p_ord <- ggplot(ord_df,
+             aes(
+               x = CAP1,
+               y = CAP2,
+               shape = Field,
+               color = `Sample type`
+             )) +
+  geom_point(size = 4, alpha = 2 / 3) +
+  theme_bw(base_size = 14) +
+  scale_colour_manual(values = pal_locuszoom("default")(3)[c(2, 3, 1)]) +
+  stat_ellipse(
+    aes(x = CAP1, y = CAP2, group = `Sample type`),
+    alpha = 0.5,
+    type = "norm",
+    level = 0.95,
+    linetype = 2,
+    inherit.aes = FALSE
+  ) +
+  labs(x = sprintf("CAP1 [%s%%]", round(evals[1], 1)), 
+       y = sprintf("CAP2 [%s%%]", round(evals[2], 1))) +
+  coord_fixed(sqrt(evals[2] / evals[1])) +
+  facet_wrap(~ Season)
+
+# # Now add the environmental variables as arrows
+# arrowmat <- scores(Ps_obj_ord1, display = "bp") # bipplot arrows
+# # Add labels, make a data.frame
+# arrowdf <- data.frame(labels = rownames(arrowmat), arrowmat)
+# 
+# arrowdf %<>%
+#   mutate(labels = fct_recode(labels,
+#     "Braunerde" = "FieldBraunerde",
+#     "Kolluvisol" = "FieldKolluvisol",
+#     "Rooibos" = "Sample.typeRooibos",
+#     "Soil" = "Sample.typeSoil"
+#   ))
+# arrowdf %<>% dplyr::slice(., c(1:4))
+# 
+# # Define the arrow aesthetic mapping
+# arrow_map = aes(xend = CAP1, yend = CAP2, x = 0, y = 0, shape = NULL, color = NULL, 
+#     label = labels)
+# label_map = aes(x = 1.2 * CAP1, y = 1.2 * CAP2, shape = NULL, color = NULL, 
+#     label = labels)
+# # Make a new graphic
+# arrowhead = arrow(length = unit(0.05, "npc"))
+# p_ord <- p_ord +
+#   geom_segment(
+#     arrow_map,
+#     size = 0.5,
+#     data = arrowdf,
+#     color = "gray",
+#     arrow = arrowhead
+#   ) + 
+#   geom_text(label_map, size = 2, data = arrowdf)
+print(p_ord)
+# dev.off()
+
+# ggsave(
+#   paste0(p_ord.file, ".png"),
+#   p_ord,
+#   device = "png",
+#   width = 10,
+#   height = 6
+# )
+# gz(paste0(p_ord.file, ".svg"), paste0(p_ord.file, ".svgz"))
+```
+
+### Variance partitioning models and ordinations - soils excluded
+#### Partitioning the data using discrete distance
+```{r var-part soil ,cache=T}
+Ps_obj_filt_median_tea <- subset_samples(Ps_obj_filt_median, Sample.type != "Soil")
+adonis(
+  otu_table(Ps_obj_filt_median_tea) ~ Lib.size,
+  data = get_variable(Ps_obj_filt_median_tea),
+  method = "horn",
+  permutations = 9999
+)
+adonis(
+  otu_table(Ps_obj_filt_median_tea) ~ Field + Sample.type * Season,
+  data = get_variable(Ps_obj_filt_median_tea),
+  method = "horn",
+  permutations = 999
+)
+```
+
+```{r pairwise var-part teas ,cache=T}
+# sample_data(Ps_obj_filt_median)$Type.season <- paste(sample_data(Ps_obj_filt)$Sample.type, sample_data(Ps_obj_filt)$Season) # too many comparisons
+
+# Ps_obj_filt_median_s <- prune_taxa(names(sort(taxa_sums(Ps_obj_filt_median), TRUE)[1:100]), Ps_obj_filt_median) # for testing
+
+# Compare sample-type pairs
+mod_pairwise3 <- PairwiseAdonis(
+  otu_table(Ps_obj_filt_median_tea),
+  sample_data(Ps_obj_filt_median_tea)$Sample.type,
+  sim.function = "vegdist",
+  sim.method = "horn",
+  p.adjust.m = "BH"
+)
+print(mod_pairwise3)
+
+(sig_pairs3 <- as.character(mod_pairwise3$pairs[mod_pairwise3$p.adjusted < 0.05]))
+# (meaningful_sig_pairs3 <- c("Green tea vs Rooibos", "Green tea vs Soil", "Rooibos vs Soil"))
+
+# compare seasons
+mod_pairwise4 <- PairwiseAdonis(
+  otu_table(Ps_obj_filt_median_tea),
+  sample_data(Ps_obj_filt_median_tea)$Season,
+  sim.function = "vegdist",
+  sim.method = "horn",
+  p.adjust.m = "BH"
+)
+print(mod_pairwise4)
+
+(sig_pairs4 <- as.character(mod_pairwise4$pairs[mod_pairwise4$p.adjusted < 0.05]))
+# (meaningful_sig_pairs2 <- c("Green tea vs Rooibos", "Green tea vs Soil", "Rooibos vs Soil"))
+```
+
+##### Calculate ordinations
+```{r ordinate tea, cache=T, fig.height=12, out.height="40%"}
+Ps_obj_ord3 <- ordinate(Ps_obj_filt_median_tea, "CAP", "horn", formula = Ps_obj_filt_median_tea ~  Field + Sample.type * Season)
+evals <- eigenvals(Ps_obj_ord3) # /sum(eigenvals(Ps_obj_ord)) * 100
+
+Ps_obj_filt_median_tea %>% 
+  plot_ordination(., Ps_obj_ord3, type = "samples", shape = "Field", color = "Sample.type", justDF = TRUE) %>% 
+  mutate_at(., "Season", ~fct_relevel(., "Winter", "Spring", "Summer", "Autumn")) %>% 
+  mutate_at(., "Sample.type", ~fct_relevel(., "Green tea", "Rooibos")) %>% 
+  dplyr::rename(., `Sample type` = Sample.type) ->
+  ord_df3
+
+# p_ord.file <- "PCoA_bray"
+# svglite(paste0(p_ord.file, ".svg"),
+#         width = 10, height = 7.2)
+
+p_ord3 <- ggplot(ord_df3,
+             aes(
+               x = CAP1,
+               y = CAP2,
+               shape = Field,
+               color = `Sample type`
+             )) +
+  geom_point(size = 4, alpha = 2 / 3) +
+  theme_bw(base_size = 14) +
+  scale_colour_manual(values = pal_locuszoom("default")(3)[c(3, 1)]) +
+  stat_ellipse(
+    aes(x = CAP1, y = CAP2, group = `Sample type`),
+    alpha = 0.5,
+    type = "norm",
+    level = 0.95,
+    linetype = 2,
+    inherit.aes = FALSE
+  ) +
+  labs(x = sprintf("Axis1 [%s%%]", round(evals[1], 1)), 
+       y = sprintf("Axis2 [%s%%]", round(evals[2], 1))) +
+  coord_fixed(sqrt(evals[2] / evals[1])) +
+  facet_wrap(~ Season)
+
+print(p_ord3)
+# dev.off()
+
+# ggsave(
+#   paste0(p_ord.file, ".png"),
+#   p_ord,
+#   device = "png",
+#   width = 10,
+#   height = 6
+# )
+# gz(paste0(p_ord.file, ".svg"), paste0(p_ord.file, ".svgz"))
+```
+
+#### Test differences between samples on the phylum and order levels
+```{r STAMPR, fig.width=12, fig.height=6, cache=T, results="hide"}
+Taxa_tests_phylum1 <- STAMPR(Ps_obj_filt_median, 
+                             vars2test = "Sample.type", 
+                             sig_pairs = sig_pairs1, 
+                             outputfile = paste0(Proj_name, "_Sample.type"))
+
+plotSTAMPR(Taxa_tests_phylum1, pair = "Green tea vs Rooibos")
+plotSTAMPR(Taxa_tests_phylum1, pair = "Green tea vs Soil")
+plotSTAMPR(Taxa_tests_phylum1, pair = "Rooibos vs Soil")
+Taxa_tests_order1 <- STAMPR(Ps_obj_filt_median, vars2test = "Sample.type", rank = "Order", sig_pairs = sig_pairs1, outputfile = paste0(Proj_name, "_Sample.type"))
+plotSTAMPR(Taxa_tests_order1, pair = "Green tea vs Rooibos", tax_level = "Order")
+plotSTAMPR(Taxa_tests_order1, pair = "Green tea vs Soil", tax_level = "Order")
+plotSTAMPR(Taxa_tests_order1, pair = "Rooibos vs Soil", tax_level = "Order")
+Taxa_tests_phylum2 <- STAMPR(Ps_obj_filt_median, vars2test = "Season", sig_pairs = sig_pairs2, outputfile = paste0(Proj_name, "_Season"))
+plotSTAMPR(Taxa_tests_phylum2, pair = "Winter vs Summer")
+Taxa_tests_order2 <- STAMPR(Ps_obj_filt_median, vars2test = "Season", rank = "Order", sig_pairs = sig_pairs2, outputfile = paste0(Proj_name, "_Season"))
+plotSTAMPR(Taxa_tests_order2, pair = "Winter vs Summer", tax_level = "Order")
+Taxa_tests_phylum4 <- STAMPR(Ps_obj_filt_median_tea, vars2test = "Season", sig_pairs = sig_pairs4, outputfile = paste0(Proj_name, "Teabags_Season"))
+plotSTAMPR(Taxa_tests_phylum4, pair = "Winter vs Summer")
+Taxa_tests_order4 <- STAMPR(Ps_obj_filt_median_tea, vars2test = "Season", rank = "Order", sig_pairs = sig_pairs4, outputfile = paste0(Proj_name, "Teabags_Season"))
+plotSTAMPR(Taxa_tests_order4, pair = "Winter vs Summer", tax_level = "Order")
+```
+
+### Differential abundance models
+Tag rare phyla (for plotting purposes only)
+```{r tag rare phyla, cache=T}
+Ps_obj_filt_media_glom <- tax_glom(Ps_obj_filt_median, 
+                             "Order", 
+                             NArm = TRUE) # glomerate to the Order level
+Ps_obj_filt_media_glom_rel <- transform_sample_counts(Ps_obj_filt_media_glom, function(x) x / sum(x)) # transform to rel. ab.
+Ps_obj_filt_media_glom_rel_DF <- psmelt(Ps_obj_filt_media_glom_rel) # generate a df
+Ps_obj_filt_media_glom_rel_DF$Order %<>% as.character() # factor to char
+
+# group dataframe by Order, calculate median rel. abundance
+Ps_obj_filt_media_glom_rel_DF %>%
+  group_by(Order) %>%
+  summarise(median = median(Abundance)) ->
+  medians
+
+# find Phyla whose median rel. abund. is less than 0.5%
+Rare_phyla <- medians[medians$median <= 0.005, ]$Order
+
+# change their name to "Rare"
+Ps_obj_filt_media_glom_rel_DF[Ps_obj_filt_media_glom_rel_DF$Order %in% Rare_phyla, ]$Order <- 'Rare'
+
+# re-group
+Ps_obj_filt_media_glom_rel_DF %>%
+  group_by(Order) %>%
+  summarise(Abundance = sum(Abundance)) %>% 
+  arrange(desc(Abundance)) -> Taxa_rank
+```
+
+
+Detect differentially abundant OTUs using ALDEx2 [@fernandes_anova-like_2013]
+
+**Sample type differences**
+```{r ALDEx2 - sample.type, cache=T, results = 'asis', fig.width=10, fig.height=6}
+significance = 0.05
+
+# run full model 
+data2test <- t(otu_table(Ps_obj_filt_median))
+# comparison <- as.character(get_variable(Ps_obj_filt_median, "Sample.type"))
+#ALDEx_full <- aldex.clr(data2test, comparison, mc.samples = 128, denom = "iqlr", verbose = TRUE, useMC = TRUE) # iqlr for slight assymetry in composition
+#ALDEx_full_glm <- aldex.glm(ALDEx_full, comparison, useMC = TRUE) # for more than two conditions
+#sig_taxa <- rownames(ALDEx_full_glm)[ALDEx_full_glm$glm.eBH < 0.05] # save names of taxa that are significant under the full model
+#write.csv(sig_taxa, file = "Aldex_full_significant_taxa.csv")
+
+# Pairwise comparisons
+# 
+ALDEx_comparisons <- list()
+ALDEx_comparisons$Comparisons <- sig_pairs1
+
+# Ps_obj_filt_median_subset <- prune_taxa(names(sort(taxa_sums(Ps_obj_filt_median), TRUE)[1:100]), Ps_obj_filt_median)
+
+for (j in seq(1, length(ALDEx_comparisons$Comparisons))) {
+  # print(j)
+  ALDEx_comparisons$Comparisons[j] %>% 
+    str_split(., " vs ", simplify = FALSE) %>% 
+    unlist() ->
+    comparison_string
+  Ps_obj_filt_median %>%
+    subset_samples(Sample.type == comparison_string[1] | Sample.type == comparison_string[2]) ->
+    # subset_samples(Treatment == comparison_string[2] | Treatment == comparison_string[4]) %>%
+    # subset_samples(Year == "2016" | Year == "2017" | Year == "2018") ->
+    Ps_obj_filt_median_pairwise
+
+#  Remove species with prevalence < 10%
+  Ps_obj_filt_median_pairwise_s <- DropRareSpecies(Ps_obj = Ps_obj_filt_median_pairwise, prevalence = 0.1)
+    
+  sample_data(Ps_obj_filt_median_pairwise_s)$Sample.type %<>% fct_relevel(., str_split(ALDEx_comparisons$Comparisons[j], " vs ", simplify = TRUE)[1])
+  
+  # make Joint.sample.name for matching OTUs between compared samples (for GGPlotTopOTUs)
+  suppressWarnings(
+  sample_data(Ps_obj_filt_median_pairwise_s) %<>%
+    as(., "data.frame") %>% 
+    rownames_to_column() %>% 
+    mutate_if(is.factor, as.character) %>% 
+    mutate(Joint.sample.name  = paste0(.$Sample.type, "_", .$Field, "_", .$Season, "_", .$Replicate)) %>% 
+    mutate_at("Joint.sample.name", ~str_replace_all(., paste0(unique(comparison_string), collapse = "|"), "")) %>% # remove the levels participating in the comparison from the names
+    mutate_at("Joint.sample.name", ~str_replace_all(., "^_", "")) %>% # remove first "_"
+    column_to_rownames()
+  )
+    
+  ALDEx2plot_pairwise <- CalcALDEx(
+    physeq_obj = Ps_obj_filt_median_pairwise_s,
+    vars2test = "Sample.type",
+    rare_phyla = Rare_phyla,
+    sig_level = significance,
+    LFC = 0
+    )
+  ALDEx_comparisons$Results[[j]] <- ALDEx2plot_pairwise # store results
+  ALDEx_comparisons$Results[[j]]$Var1 <- str_split(ALDEx_comparisons$Comparisons[j], " vs ", simplify = TRUE)[1]
+  ALDEx_comparisons$Results[[j]]$Var2 <- str_split(ALDEx_comparisons$Comparisons[j], " vs ", simplify = TRUE)[2]
+  ALDEX_summary <- tibble(Label = c(paste0("⬆", sum( ALDEx_comparisons$Results[[j]]$effect > 0 &  ALDEx_comparisons$Results[[j]]$Significance == "Pass"), " ⬇", sum( ALDEx_comparisons$Results[[j]]$effect < 0 &  ALDEx_comparisons$Results[[j]]$Significance == "Pass"), " (", nrow( ALDEx_comparisons$Results[[j]]), ")")))
+  
+  ALDEx2plot_pairwise %>%
+    filter(Significance == "Pass") %>%
+    dplyr::select(OTU, baseMean, effect, Order, Class, Order, Family, Genus) %>%
+    arrange(desc(abs(effect))) ->
+    ALDEx2plot_pairwise_results
+    
+  # print(ALDEx2plot_pairwise_results %>% 
+  #   kable(., digits = c(2), caption = "Significantly different taxa:") %>%
+  #   kable_styling(
+  #     bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+  #     full_width = F
+  #   ))
+  
+  write.csv(ALDEx2plot_pairwise_results, file = paste0("Aldex", "_", paste0(comparison_string, collapse = "_"), ".csv"))
+  
+  # Plot ALDEX plot
+  p1 <- GGPlotALDExTax(ALDEx2plot_pairwise, OTU_labels = FALSE, Taxa = "Order", sig_level = significance) +
+    # ggtitle(ALDEx_comparisons$Comparisons[j]) +
+    geom_text(
+    data    = ALDEX_summary,
+    mapping = aes(x = Inf, y = Inf, label = Label),
+    hjust   = 1.1,
+    vjust   = 1.6
+  ) 
+  p1 <- p1 + labs(title = ALDEx_comparisons$Comparisons[j])
+  print(p1)
+  
+  # Plot OTU plots
+  # GGPlotOTU(Ps_obj_filt_subset_pairwise_s, vars2test = "Spill.Treatment", "Seq_8")
+  p2 <- GGPlotTopOTUs(
+    physeq_obj = Ps_obj_filt_median_pairwise_s,
+    vars2test = "Sample.type",
+    ALDEx_obj = ALDEx2plot_pairwise,
+    tax_level = "Order",
+    rank_by = "effect",
+    Ntop = 12
+  )
+  print(p2)
+}
+
+filter(ALDEx_comparisons$Results[[1]], Significance == "Pass")$OTU[common_taxa <- filter(ALDEx_comparisons$Results[[1]], Significance == "Pass")$OTU %in% filter(ALDEx_comparisons$Results[[2]], Significance == "Pass")$OTU]
+```
+
+####Seasonal differences
+Comparing the seasonsal differences in teabag samples only
+```{r ALDEx2 - season, cache=T, results = 'asis', fig.width=10, fig.height=6}
+significance = 0.05
+
+data2test <- t(otu_table(Ps_obj_filt_median_tea))
+
+# Pairwise comparisons
+ALDEx_comparisons <- list()
+ALDEx_comparisons$Comparisons <- sig_pairs2
+
+# Ps_obj_filt_median_tea_subset <- prune_taxa(names(sort(taxa_sums(Ps_obj_filt_median_tea), TRUE)[1:100]), Ps_obj_filt_median_tea)
+
+for (j in seq(1, length(ALDEx_comparisons$Comparisons))) {
+  # print(j)
+  ALDEx_comparisons$Comparisons[j] %>% 
+    str_split(., " vs ", simplify = FALSE) %>% 
+    unlist() ->
+    comparison_string
+  Ps_obj_filt_median_tea %>%
+    subset_samples(Season == comparison_string[1] | Season == comparison_string[2]) ->
+    # subset_samples(Treatment == comparison_string[2] | Treatment == comparison_string[4]) %>%
+    # subset_samples(Year == "2016" | Year == "2017" | Year == "2018") ->
+    Ps_obj_filt_median_tea_pairwise
+
+#  Remove species with prevalence < 10%
+  Ps_obj_filt_median_tea_pairwise_s <- DropRareSpecies(Ps_obj = Ps_obj_filt_median_tea_pairwise, prevalence = 0.1)
+    
+  sample_data(Ps_obj_filt_median_tea_pairwise_s)$Season %<>% fct_relevel(., str_split(ALDEx_comparisons$Comparisons[j], " vs ", simplify = TRUE)[1])
+  
+  # make Joint.sample.name for matching OTUs between compared samples (for GGPlotTopOTUs)
+  suppressWarnings(
+  sample_data(Ps_obj_filt_median_tea_pairwise_s) %<>% 
+    as(., "data.frame") %>% 
+    rownames_to_column() %>% 
+    mutate_if(is.factor, as.character) %>% 
+    mutate(Joint.sample.name  = paste0(.$Sample.type, "_", .$Field, "_", .$Season, "_", .$Replicate)) %>% 
+    mutate_at("Joint.sample.name", ~str_replace_all(., paste0(unique(comparison_string), collapse = "|"), "")) %>% # remove the levels participating in the comparison from the names
+    mutate_at("Joint.sample.name", ~str_replace_all(., "^_", "")) %>% # remove first "_"
+    mutate_at("Joint.sample.name", ~str_replace_all(., "__", "_")) %>% # remove double "_"
+    column_to_rownames()
+  )
+    
+  ALDEx2plot_pairwise <- CalcALDEx(
+    physeq_obj = Ps_obj_filt_median_tea_pairwise_s,
+    vars2test = "Season",
+    rare_phyla = Rare_phyla,
+    sig_level = significance,
+    LFC = 0
+    )
+  ALDEx_comparisons$Results[[j]] <- ALDEx2plot_pairwise # store results
+  ALDEx_comparisons$Results[[j]]$Var1 <- str_split(ALDEx_comparisons$Comparisons[j], " vs ", simplify = TRUE)[1]
+  ALDEx_comparisons$Results[[j]]$Var2 <- str_split(ALDEx_comparisons$Comparisons[j], " vs ", simplify = TRUE)[2]
+  ALDEX_summary <- tibble(Label = c(paste0("⬆", sum( ALDEx_comparisons$Results[[j]]$effect > 0 &  ALDEx_comparisons$Results[[j]]$Significance == "Pass"), " ⬇", sum( ALDEx_comparisons$Results[[j]]$effect < 0 &  ALDEx_comparisons$Results[[j]]$Significance == "Pass"), " (", nrow( ALDEx_comparisons$Results[[j]]), ")")))
+  
+  ALDEx2plot_pairwise %>%
+    filter(Significance == "Pass") %>%
+    dplyr::select(OTU, baseMean, effect, Order, Class, Order, Family, Genus) %>%
+    arrange(desc(abs(effect))) ->
+    ALDEx2plot_pairwise_results
+    
+  # print(ALDEx2plot_pairwise_results %>% 
+  #   kable(., digits = c(2), caption = "Significantly different taxa:") %>%
+  #   kable_styling(
+  #     bootstrap_options = c("striped", "hover", "condensed", "responsive"),
+  #     full_width = F
+  #   ))
+  
+  write.csv(ALDEx2plot_pairwise_results, file = paste0("Aldex", "_", paste0(comparison_string, collapse = "_"), ".csv"))
+  
+  # Plot ALDEX plot
+  p1 <- GGPlotALDExTax(ALDEx2plot_pairwise, OTU_labels = FALSE, sig_level = significance) +
+    # ggtitle(ALDEx_comparisons$Comparisons[j]) +
+    geom_text(
+    data    = ALDEX_summary,
+    mapping = aes(x = Inf, y = Inf, label = Label),
+    hjust   = 1.1,
+    vjust   = 1.6
+  ) 
+  p1 <- p1 + labs(title = ALDEx_comparisons$Comparisons[j])
+  print(p1)
+  
+  # Plot OTU plots
+  p2 <- GGPlotTopOTUs(
+    physeq_obj = Ps_obj_filt_median_tea_pairwise_s,
+    vars2test = "Season",
+    ALDEx_obj = ALDEx2plot_pairwise,
+    tax_level = "Order",
+    rank_by = "effect",
+    Ntop = 12
+  )
+  print(p2)
+}
+
+filter(ALDEx_comparisons$Results[[1]], Significance == "Pass")$OTU[common_taxa <- filter(ALDEx_comparisons$Results[[1]], Significance == "Pass")$OTU %in% filter(ALDEx_comparisons$Results[[2]], Significance == "Pass")$OTU]
+```
+
+```{r colophon, eval=T}
+sessioninfo::session_info() %>%
+  details::details(
+    summary = 'Current session info',
+    open    = TRUE
+ )
+```
+
+## References
