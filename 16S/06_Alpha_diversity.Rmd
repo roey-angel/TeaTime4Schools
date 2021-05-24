@@ -54,6 +54,8 @@ opts_chunk$set(
   cache = TRUE,
   dev = "ragg_png",
   fig.ext = "png",
+  # dev = c("svglite", "ragg_png"),
+  # dev.args = list(svglite = list(bg = 'white', fix_text_size = FALSE), ragg_png = list(bg = 'white')),
   dpi = 300,
 #  fig.width = 12,
 #  fig.height = 8,
